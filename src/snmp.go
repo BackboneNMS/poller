@@ -242,10 +242,16 @@ func CollectSNMPData(ctx context.Context, device dashboard.Device, polledAt time
 		return nil, err
 	}
 
-	inventory, err := collectInventory(client)
+	physicalRows, err := walkTable(client, oidPhysicalEntityEntry)
 
 	if err != nil {
 		return nil, err
+	}
+
+	inventory := collectInventory(physicalRows)
+
+	if err = collectOptics(client, objectIDEnterpriseNumber(system.ObjectID), physicalRows, interfaces); err != nil {
+		logger.Warn("Failed to collect transceiver light levels", "device", device.Name, "host", device.Host, "error", err)
 	}
 
 	resources, err := collectResources(client)
@@ -519,13 +525,7 @@ func collectLLDPManagementAddresses(client *gosnmp.GoSNMP) (map[string][]string,
 	return addresses, nil
 }
 
-func collectInventory(client *gosnmp.GoSNMP) ([]inventoryItem, error) {
-	rows, err := walkTable(client, oidPhysicalEntityEntry)
-
-	if err != nil {
-		return nil, err
-	}
-
+func collectInventory(rows map[string]snmpRow) []inventoryItem {
 	indexes := make([]int, 0, len(rows))
 
 	for index := range rows {
@@ -558,7 +558,7 @@ func collectInventory(client *gosnmp.GoSNMP) ([]inventoryItem, error) {
 		inventory = append(inventory, item)
 	}
 
-	return inventory, nil
+	return inventory
 }
 
 func collectResources(client *gosnmp.GoSNMP) (*dashboard.Resources, error) {

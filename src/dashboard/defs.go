@@ -117,6 +117,13 @@ type Interface struct {
 	OutErrors          int64      `json:"outErrors"`
 	InBitsPerSecond    *int64     `json:"inBitsPerSecond"`
 	OutBitsPerSecond   *int64     `json:"outBitsPerSecond"`
+	Optical            *Optical   `json:"optical"`
+}
+
+// Optical holds the transceiver light levels of an interface, with one value per lane (a single value for most optics).
+type Optical struct {
+	RxPowerDBm []float64 `json:"rxPowerDBm"`
+	TxPowerDBm []float64 `json:"txPowerDBm"`
 }
 
 type Neighbor struct {

@@ -20,6 +20,7 @@ Only outbound HTTPS to the dashboard is required. Interface throughput is calcul
 | Manufacturer, model, serial number and firmware | ENTITY-MIB, plus vendor detection from `sysObjectID` |
 | CPU load, memory and storage usage | HOST-RESOURCES-MIB |
 | Directly connected neighbors | LLDP-MIB |
+| Transceiver receive and transmit light levels, per lane | ENTITY-SENSOR-MIB, CISCO-ENTITY-SENSOR-MIB, JUNIPER-DOM-MIB, MIKROTIK-MIB |
 
 ## Installation
 
