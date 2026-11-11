@@ -19,7 +19,7 @@ const (
 var (
 	conf   *config.Config = config.New()
 	client *api.Client    = nil
-	logger *slog.Logger   = slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	logger *slog.Logger   = newLogger()
 )
 
 func main() {
