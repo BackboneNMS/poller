@@ -108,7 +108,7 @@ func PollAllDevices(ctx context.Context) time.Duration {
 				return
 			}
 
-			if !result.Reachable {
+			if !result.Reachable && !(device.PingOnly && result.Online) {
 				failed.Add(1)
 			}
 
@@ -164,6 +164,11 @@ func PollDevice(ctx context.Context, device api.Device, interval time.Duration, 
 	polledAt := time.Now()
 
 	online, latency := PingHost(ctx, device.Host)
+
+	if device.PingOnly {
+		return pingOnlyResult(device, polledAt, online, latency)
+	}
+
 	data, pollErr := CollectSNMPData(ctx, device, polledAt, wasUnreachable(device.ID), discover)
 
 	setUnreachable(device.ID, pollErr != nil)
@@ -194,6 +199,26 @@ func PollDevice(ctx context.Context, device api.Device, interval time.Duration, 
 	result.Resources = data.Resources
 
 	calculateInterfaceRates(&result, interval)
+
+	return result
+}
+
+// pingOnlyResult reports a device that is monitored by ping alone. It is never reachable over SNMP, so the polling
+// server decides its status from Online, and Error is only set when it did not answer.
+func pingOnlyResult(device api.Device, polledAt time.Time, online bool, latency *float64) api.PollResult {
+	result := api.PollResult{
+		DeviceID:       device.ID,
+		PolledAt:       polledAt,
+		PollDurationMS: time.Since(polledAt).Milliseconds(),
+		Online:         online,
+		LatencyMS:      latency,
+		Interfaces:     make([]api.Interface, 0),
+		Neighbors:      make([]api.Neighbor, 0),
+	}
+
+	if !online {
+		result.Error = PointerOf("No response to ping")
+	}
 
 	return result
 }

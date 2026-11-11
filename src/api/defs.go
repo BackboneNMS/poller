@@ -44,11 +44,13 @@ type DeviceList struct {
 // Device is a device for the poller to poll. Every device gets a status poll each cycle; Discover asks for a full
 // discovery instead, which also walks the tables that rarely change (neighbors, addresses, inventory, optics).
 // DiscoveryRequestedAt is set while someone has asked for a rediscovery from the dashboard, and LastDiscoveredAt orders
-// the queue so the devices discovered longest ago go first.
+// the queue so the devices discovered longest ago go first. PingOnly devices are only pinged, never queried over SNMP,
+// and are sent without credentials.
 type Device struct {
 	ID                   string     `json:"_id"`
 	Name                 string     `json:"name"`
 	Host                 string     `json:"host"`
+	PingOnly             bool       `json:"pingOnly"`
 	SNMP                 DeviceSNMP `json:"snmp"`
 	Discover             bool       `json:"discover"`
 	DiscoveryRequestedAt *time.Time `json:"discoveryRequestedAt"`
