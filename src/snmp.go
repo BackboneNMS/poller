@@ -176,8 +176,9 @@ type inventoryItem struct {
 
 // connectSNMP tries each of the device's credentials in order and returns a connected client for the first one the agent
 // answers, along with the system details it returned. Agents silently drop requests with an unknown community, so a wrong
-// credential costs one SNMP timeout before the next one is tried.
-func connectSNMP(ctx context.Context, device api.Device) (*gosnmp.GoSNMP, *api.System, *string, error) {
+// credential costs one SNMP timeout before the next one is tried. Devices that did not answer on their last poll are
+// probed without retries, since most of them will not answer this time either and each retry costs another timeout.
+func connectSNMP(ctx context.Context, device api.Device, wasUnreachable bool) (*gosnmp.GoSNMP, *api.System, *string, error) {
 	if len(device.SNMP.Credentials) < 1 {
 		return nil, nil, nil, errors.New("connectSNMP: no SNMP credentials are configured for this device")
 	}
@@ -199,9 +200,15 @@ func connectSNMP(ctx context.Context, device api.Device) (*gosnmp.GoSNMP, *api.S
 			continue
 		}
 
+		if wasUnreachable {
+			client.Retries = 0
+		}
+
 		system, err := collectSystem(client)
 
 		if err == nil {
+			client.Retries = conf.SNMP.Retries
+
 			return client, system, credential.ID, nil
 		}
 
@@ -221,8 +228,11 @@ func connectSNMP(ctx context.Context, device api.Device) (*gosnmp.GoSNMP, *api.S
 	return nil, nil, nil, fmt.Errorf("connectSNMP: none of the %d SNMP credentials received a response, last error: %w", len(device.SNMP.Credentials), lastErr)
 }
 
-func CollectSNMPData(ctx context.Context, device api.Device, polledAt time.Time) (*snmpData, error) {
-	client, system, credentialID, err := connectSNMP(ctx, device)
+// CollectSNMPData polls a device over SNMP. A status poll (discover false) reads only what changes from poll to poll:
+// the system details, interface status and counters, and resources. A discovery also walks the tables that rarely
+// change (IP addresses, LLDP neighbors, inventory and transceiver optics), which is most of the work on large devices.
+func CollectSNMPData(ctx context.Context, device api.Device, polledAt time.Time, wasUnreachable, discover bool) (*snmpData, error) {
+	client, system, credentialID, err := connectSNMP(ctx, device, wasUnreachable)
 
 	if err != nil {
 		return nil, err
@@ -230,28 +240,30 @@ func CollectSNMPData(ctx context.Context, device api.Device, polledAt time.Time)
 
 	defer client.Conn.Close()
 
-	interfaces, err := collectInterfaces(client, polledAt.Add(-time.Duration(system.UptimeSeconds)*time.Second))
+	interfaces, err := collectInterfaces(client, polledAt.Add(-time.Duration(system.UptimeSeconds)*time.Second), discover)
 
 	if err != nil {
 		return nil, err
 	}
 
-	neighbors, err := collectNeighbors(client, interfaces)
+	neighbors := make([]api.Neighbor, 0)
 
-	if err != nil {
-		return nil, err
-	}
+	if discover {
+		if neighbors, err = collectNeighbors(client, interfaces); err != nil {
+			return nil, err
+		}
 
-	physicalRows, err := walkTable(client, oidPhysicalEntityEntry)
+		physicalRows, err := walkTable(client, oidPhysicalEntityEntry, 2, 4, 5, 7, 8, 9, 10, 11, 12, 13)
 
-	if err != nil {
-		return nil, err
-	}
+		if err != nil {
+			return nil, err
+		}
 
-	inventory := collectInventory(physicalRows)
+		if err = collectOptics(client, objectIDEnterpriseNumber(system.ObjectID), physicalRows, interfaces); err != nil {
+			logger.Warn("Failed to collect transceiver light levels", "device", device.Name, "host", device.Host, "error", err)
+		}
 
-	if err = collectOptics(client, objectIDEnterpriseNumber(system.ObjectID), physicalRows, interfaces); err != nil {
-		logger.Warn("Failed to collect transceiver light levels", "device", device.Name, "host", device.Host, "error", err)
+		applyHardwareDetails(system, collectInventory(physicalRows))
 	}
 
 	resources, err := collectResources(client)
@@ -259,8 +271,6 @@ func CollectSNMPData(ctx context.Context, device api.Device, polledAt time.Time)
 	if err != nil {
 		return nil, err
 	}
-
-	applyHardwareDetails(system, inventory)
 
 	return &snmpData{
 		CredentialID: credentialID,
@@ -311,23 +321,34 @@ func collectSystem(client *gosnmp.GoSNMP) (*api.System, error) {
 	return system, nil
 }
 
-func collectInterfaces(client *gosnmp.GoSNMP, bootedAt time.Time) ([]api.Interface, error) {
-	rows, err := walkTable(client, oidInterfaceEntry)
+// collectInterfaces reads the interface tables. A status poll reads only the speed, status and counter columns (ifTable)
+// and the name and 64-bit counters (ifXTable); a discovery also reads the description, type, MTU, MAC address, alias and
+// IP addresses, which the polling server keeps from the last discovery in between.
+func collectInterfaces(client *gosnmp.GoSNMP, bootedAt time.Time, discover bool) ([]api.Interface, error) {
+	columns, extensionColumns := []int{5, 7, 8, 9, 10, 13, 14, 16, 19, 20}, []int{1, 6, 10, 15}
+
+	if discover {
+		columns, extensionColumns = append(columns, 2, 3, 4, 6), append(extensionColumns, 18)
+	}
+
+	rows, err := walkTable(client, oidInterfaceEntry, columns...)
 
 	if err != nil {
 		return nil, err
 	}
 
-	extensionRows, err := walkTable(client, oidInterfaceExtensionEntry)
+	extensionRows, err := walkTable(client, oidInterfaceExtensionEntry, extensionColumns...)
 
 	if err != nil {
 		return nil, err
 	}
 
-	addresses, err := collectIPAddresses(client)
+	addresses := make(map[int][]string)
 
-	if err != nil {
-		return nil, err
+	if discover {
+		if addresses, err = collectIPAddresses(client); err != nil {
+			return nil, err
+		}
 	}
 
 	interfaces := make([]api.Interface, 0, len(rows))
@@ -382,7 +403,7 @@ func collectInterfaces(client *gosnmp.GoSNMP, bootedAt time.Time) ([]api.Interfa
 }
 
 func collectIPAddresses(client *gosnmp.GoSNMP) (map[int][]string, error) {
-	rows, err := walkTable(client, oidIPAddressEntry)
+	rows, err := walkTable(client, oidIPAddressEntry, 2, 3)
 
 	if err != nil {
 		return nil, err
@@ -412,13 +433,13 @@ func collectIPAddresses(client *gosnmp.GoSNMP) (map[int][]string, error) {
 }
 
 func collectNeighbors(client *gosnmp.GoSNMP, interfaces []api.Interface) ([]api.Neighbor, error) {
-	localPorts, err := walkTable(client, oidLLDPLocalPortEntry)
+	localPorts, err := walkTable(client, oidLLDPLocalPortEntry, 2, 3, 4)
 
 	if err != nil {
 		return nil, err
 	}
 
-	rows, err := walkTable(client, oidLLDPRemoteEntry)
+	rows, err := walkTable(client, oidLLDPRemoteEntry, 4, 5, 6, 7, 8, 9, 10)
 
 	if err != nil {
 		return nil, err
@@ -473,7 +494,7 @@ func collectNeighbors(client *gosnmp.GoSNMP, interfaces []api.Interface) ([]api.
 }
 
 func collectLLDPManagementAddresses(client *gosnmp.GoSNMP) (map[string][]string, error) {
-	rows, err := walkTable(client, oidLLDPRemoteManagementEntry)
+	rows, err := walkTable(client, oidLLDPRemoteManagementEntry, 3, 4, 5)
 
 	if err != nil {
 		return nil, err
@@ -562,13 +583,13 @@ func collectInventory(rows map[string]snmpRow) []inventoryItem {
 }
 
 func collectResources(client *gosnmp.GoSNMP) (*api.Resources, error) {
-	processors, err := walkTable(client, oidProcessorEntry)
+	processors, err := walkTable(client, oidProcessorEntry, 2)
 
 	if err != nil {
 		return nil, err
 	}
 
-	rows, err := walkTable(client, oidStorageEntry)
+	rows, err := walkTable(client, oidStorageEntry, 2, 3, 4, 5, 6)
 
 	if err != nil {
 		return nil, err
@@ -707,51 +728,6 @@ func descriptionModel(enterpriseNumber, description string) string {
 	default:
 		return ""
 	}
-}
-
-func walkTable(client *gosnmp.GoSNMP, entryOID string) (map[string]snmpRow, error) {
-	rows := make(map[string]snmpRow)
-	prefix := entryOID + "."
-
-	walk := client.BulkWalk
-
-	if client.Version == gosnmp.Version1 {
-		walk = client.Walk
-	}
-
-	err := walk(entryOID, func(pdu gosnmp.SnmpPDU) error {
-		suffix, ok := strings.CutPrefix(strings.TrimPrefix(pdu.Name, "."), prefix)
-
-		if !ok {
-			return nil
-		}
-
-		rawColumn, index, ok := strings.Cut(suffix, ".")
-
-		if !ok {
-			return nil
-		}
-
-		column, err := strconv.Atoi(rawColumn)
-
-		if err != nil {
-			return nil
-		}
-
-		if rows[index] == nil {
-			rows[index] = make(snmpRow)
-		}
-
-		rows[index][column] = pdu
-
-		return nil
-	})
-
-	if err != nil && strings.HasPrefix(err.Error(), "OID not increasing") {
-		return rows, nil
-	}
-
-	return rows, err
 }
 
 func rowString(row snmpRow, column int) string {

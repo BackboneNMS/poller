@@ -4,6 +4,7 @@ polling_server:
   token: ''
   timeout: 30s
 snmp:
-  concurrency: 32
+  concurrency: 128
+  discovery_concurrency: 4
   timeout: 5s
   retries: 1

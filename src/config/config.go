@@ -18,9 +18,10 @@ type Config struct {
 		Timeout time.Duration `yaml:"timeout"`
 	} `yaml:"polling_server"`
 	SNMP struct {
-		Concurrency int           `yaml:"concurrency"`
-		Timeout     time.Duration `yaml:"timeout"`
-		Retries     int           `yaml:"retries"`
+		Concurrency          int           `yaml:"concurrency"`
+		DiscoveryConcurrency int           `yaml:"discovery_concurrency"`
+		Timeout              time.Duration `yaml:"timeout"`
+		Retries              int           `yaml:"retries"`
 	} `yaml:"snmp"`
 }
 
@@ -28,7 +29,8 @@ func New() *Config {
 	c := &Config{}
 
 	c.PollingServer.Timeout = 30 * time.Second
-	c.SNMP.Concurrency = 32
+	c.SNMP.Concurrency = 128
+	c.SNMP.DiscoveryConcurrency = 4
 	c.SNMP.Timeout = 5 * time.Second
 	c.SNMP.Retries = 1
 
@@ -94,6 +96,10 @@ func (c *Config) validate() error {
 
 	if c.SNMP.Concurrency < 1 {
 		return errors.New("snmp.concurrency must be at least 1")
+	}
+
+	if c.SNMP.DiscoveryConcurrency < 1 {
+		return errors.New("snmp.discovery_concurrency must be at least 1")
 	}
 
 	if c.SNMP.Timeout <= 0 {

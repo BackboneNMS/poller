@@ -30,11 +30,13 @@ func main() {
 
 	client = api.New(conf.PollingServer.URLs, conf.PollingServer.Token, Version, conf.PollingServer.Timeout)
 
-	logger.Info("Starting poller", "version", Version, "pollingServers", conf.PollingServer.URLs, "concurrency", conf.SNMP.Concurrency)
+	logger.Info("Starting poller", "version", Version, "pollingServers", conf.PollingServer.URLs, "concurrency", conf.SNMP.Concurrency, "discoveryConcurrency", conf.SNMP.DiscoveryConcurrency)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 
 	defer stop()
+
+	go RunDiscoveryWorkers(ctx)
 
 	for {
 		startedAt := time.Now()

@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,8 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -20,6 +23,7 @@ type Client struct {
 	hostname string
 	http     *http.Client
 	current  atomic.Int32
+	gzipURLs sync.Map
 }
 
 // statusError is a response from a polling server that was not successful
@@ -76,9 +80,25 @@ func (c *Client) request(ctx context.Context, method, path string, body, result 
 	start := int(c.current.Load())
 	errs := make([]error, 0, len(c.urls))
 
+	var compressed []byte
+
 	for attempt := range len(c.urls) {
 		index := (start + attempt) % len(c.urls)
-		err := c.send(ctx, c.urls[index], method, path, data, result)
+		payload, encoding := data, ""
+
+		if data != nil && c.acceptsGzip(c.urls[index]) {
+			if compressed == nil {
+				var err error
+
+				if compressed, err = gzipBytes(data); err != nil {
+					return err
+				}
+			}
+
+			payload, encoding = compressed, "gzip"
+		}
+
+		err := c.send(ctx, c.urls[index], method, path, payload, encoding, result)
 
 		if err == nil {
 			c.current.Store(int32(index))
@@ -98,7 +118,7 @@ func (c *Client) request(ctx context.Context, method, path string, body, result 
 	return fmt.Errorf("%s %s: %w", method, path, errors.Join(errs...))
 }
 
-func (c *Client) send(ctx context.Context, url, method, path string, data []byte, result any) error {
+func (c *Client) send(ctx context.Context, url, method, path string, data []byte, encoding string, result any) error {
 	var reader io.Reader
 
 	if data != nil {
@@ -120,6 +140,10 @@ func (c *Client) send(ctx context.Context, url, method, path string, data []byte
 		req.Header.Set("Content-Type", "application/json")
 	}
 
+	if len(encoding) > 0 {
+		req.Header.Set("Content-Encoding", encoding)
+	}
+
 	res, err := c.http.Do(req)
 
 	if err != nil {
@@ -127,6 +151,8 @@ func (c *Client) send(ctx context.Context, url, method, path string, data []byte
 	}
 
 	defer res.Body.Close()
+
+	c.gzipURLs.Store(url, strings.Contains(res.Header.Get("Accept-Encoding"), "gzip"))
 
 	if res.StatusCode != http.StatusOK {
 		message, _ := io.ReadAll(io.LimitReader(res.Body, 1024))
@@ -139,4 +165,28 @@ func (c *Client) send(ctx context.Context, url, method, path string, data []byte
 	}
 
 	return json.NewDecoder(res.Body).Decode(result)
+}
+
+// acceptsGzip reports whether a polling server has said it accepts gzip request bodies, in the Accept-Encoding header
+// of its last response (RFC 7694). Servers that never said so, including older releases, receive uncompressed bodies.
+func (c *Client) acceptsGzip(url string) bool {
+	accepts, _ := c.gzipURLs.Load(url)
+
+	return accepts == true
+}
+
+func gzipBytes(data []byte) ([]byte, error) {
+	var buffer bytes.Buffer
+
+	writer := gzip.NewWriter(&buffer)
+
+	if _, err := writer.Write(data); err != nil {
+		return nil, err
+	}
+
+	if err := writer.Close(); err != nil {
+		return nil, err
+	}
+
+	return buffer.Bytes(), nil
 }

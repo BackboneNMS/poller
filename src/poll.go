@@ -10,6 +10,7 @@ import (
 
 const (
 	submitBatchSize = 50
+	submitWorkers   = 4
 	maxErrorLength  = 2000
 )
 
@@ -22,7 +23,27 @@ type counterSample struct {
 var (
 	previousSamples   = make(map[string]counterSample)
 	previousSamplesMu sync.Mutex
+
+	// unreachableDevices holds the devices whose last poll got no SNMP response
+	unreachableDevices   = make(map[string]struct{})
+	unreachableDevicesMu sync.Mutex
+
+	// deviceLocks keeps a status poll and a discovery of the same device from running at the same time
+	deviceLocks sync.Map
+
+	// pollInterval is the organization's polling interval from the last device list, used by discoveries for rates
+	pollInterval atomic.Int64
 )
+
+func deviceLock(deviceID string) *sync.Mutex {
+	lock, _ := deviceLocks.LoadOrStore(deviceID, &sync.Mutex{})
+
+	return lock.(*sync.Mutex)
+}
+
+func currentPollInterval() time.Duration {
+	return time.Duration(pollInterval.Load())
+}
 
 func PollAllDevices(ctx context.Context) time.Duration {
 	startedAt := time.Now()
@@ -37,17 +58,23 @@ func PollAllDevices(ctx context.Context) time.Duration {
 
 	interval := time.Duration(list.PollInterval) * time.Second
 
-	pruneSamples(list.Devices)
+	pollInterval.Store(int64(interval))
+	pruneDeviceState(list.Devices)
+
+	queued := discoveries.Schedule(list.Devices, startedAt)
 
 	var (
 		wg        sync.WaitGroup
 		submitted sync.WaitGroup
 		failed    atomic.Int64
+		skipped   atomic.Int64
 		slots     = make(chan struct{}, conf.SNMP.Concurrency)
 		results   = make(chan api.PollResult, submitBatchSize)
 	)
 
-	submitted.Go(func() { submitResults(ctx, results) })
+	for range submitWorkers {
+		submitted.Go(func() { submitResults(ctx, results) })
+	}
 
 	for _, device := range list.Devices {
 		wg.Go(func() {
@@ -57,19 +84,35 @@ func PollAllDevices(ctx context.Context) time.Duration {
 				return
 			}
 
-			defer func() { <-slots }()
+			var (
+				result api.PollResult
+				polled bool
+			)
 
-			RunRecovered("PollDevice", func() {
-				result := PollDevice(ctx, device, interval)
+			// A device being discovered right now is skipped, since its discovery reports everything a status poll would
+			if lock := deviceLock(device.ID); lock.TryLock() {
+				RunRecovered("PollDevice", func() {
+					defer lock.Unlock()
 
-				if !result.Reachable {
-					failed.Add(1)
-				}
+					result = PollDevice(ctx, device, interval, false)
+					polled = true
+				})
+			} else {
+				skipped.Add(1)
+			}
 
-				if ctx.Err() == nil {
-					results <- result
-				}
-			})
+			// The slot is released before queuing the result, so a slow upload never holds up polling
+			<-slots
+
+			if !polled || ctx.Err() != nil {
+				return
+			}
+
+			if !result.Reachable {
+				failed.Add(1)
+			}
+
+			results <- result
 		})
 	}
 
@@ -81,6 +124,8 @@ func PollAllDevices(ctx context.Context) time.Duration {
 		"Completed poll cycle",
 		"devices", len(list.Devices),
 		"unreachable", failed.Load(),
+		"skippedWhileDiscovering", skipped.Load(),
+		"discoveriesQueued", queued,
 		"duration", time.Since(startedAt).Round(time.Millisecond).String(),
 		"interval", interval.String(),
 	)
@@ -114,14 +159,18 @@ func submitResults(ctx context.Context, results <-chan api.PollResult) {
 	flush()
 }
 
-func PollDevice(ctx context.Context, device api.Device, interval time.Duration) api.PollResult {
+// PollDevice pings a device and polls it over SNMP, either a status poll or a full discovery
+func PollDevice(ctx context.Context, device api.Device, interval time.Duration, discover bool) api.PollResult {
 	polledAt := time.Now()
 
 	online, latency := PingHost(ctx, device.Host)
-	data, pollErr := CollectSNMPData(ctx, device, polledAt)
+	data, pollErr := CollectSNMPData(ctx, device, polledAt, wasUnreachable(device.ID), discover)
+
+	setUnreachable(device.ID, pollErr != nil)
 
 	result := api.PollResult{
 		DeviceID:       device.ID,
+		Discovery:      discover,
 		PolledAt:       polledAt,
 		PollDurationMS: time.Since(polledAt).Milliseconds(),
 		Online:         online,
@@ -149,7 +198,7 @@ func PollDevice(ctx context.Context, device api.Device, interval time.Duration) 
 	return result
 }
 
-func pruneSamples(devices []api.Device) {
+func pruneDeviceState(devices []api.Device) {
 	active := make(map[string]struct{}, len(devices))
 
 	for _, device := range devices {
@@ -157,12 +206,51 @@ func pruneSamples(devices []api.Device) {
 	}
 
 	previousSamplesMu.Lock()
-	defer previousSamplesMu.Unlock()
 
 	for id := range previousSamples {
 		if _, ok := active[id]; !ok {
 			delete(previousSamples, id)
 		}
+	}
+
+	previousSamplesMu.Unlock()
+
+	unreachableDevicesMu.Lock()
+
+	for id := range unreachableDevices {
+		if _, ok := active[id]; !ok {
+			delete(unreachableDevices, id)
+		}
+	}
+
+	unreachableDevicesMu.Unlock()
+
+	deviceLocks.Range(func(id, lock any) bool {
+		if _, ok := active[id.(string)]; !ok && lock.(*sync.Mutex).TryLock() {
+			deviceLocks.Delete(id)
+		}
+
+		return true
+	})
+}
+
+func wasUnreachable(deviceID string) bool {
+	unreachableDevicesMu.Lock()
+	defer unreachableDevicesMu.Unlock()
+
+	_, ok := unreachableDevices[deviceID]
+
+	return ok
+}
+
+func setUnreachable(deviceID string, unreachable bool) {
+	unreachableDevicesMu.Lock()
+	defer unreachableDevicesMu.Unlock()
+
+	if unreachable {
+		unreachableDevices[deviceID] = struct{}{}
+	} else {
+		delete(unreachableDevices, deviceID)
 	}
 }
 

@@ -41,11 +41,18 @@ type DeviceList struct {
 	Devices        []Device `json:"devices"`
 }
 
+// Device is a device for the poller to poll. Every device gets a status poll each cycle; Discover asks for a full
+// discovery instead, which also walks the tables that rarely change (neighbors, addresses, inventory, optics).
+// DiscoveryRequestedAt is set while someone has asked for a rediscovery from the dashboard, and LastDiscoveredAt orders
+// the queue so the devices discovered longest ago go first.
 type Device struct {
-	ID   string     `json:"_id"`
-	Name string     `json:"name"`
-	Host string     `json:"host"`
-	SNMP DeviceSNMP `json:"snmp"`
+	ID                   string     `json:"_id"`
+	Name                 string     `json:"name"`
+	Host                 string     `json:"host"`
+	SNMP                 DeviceSNMP `json:"snmp"`
+	Discover             bool       `json:"discover"`
+	DiscoveryRequestedAt *time.Time `json:"discoveryRequestedAt"`
+	LastDiscoveredAt     *time.Time `json:"lastDiscoveredAt"`
 }
 
 type DeviceSNMP struct {
@@ -66,8 +73,12 @@ type SNMPCredential struct {
 	PrivacyPassword string  `json:"privacyPassword"`
 }
 
+// PollResult is the outcome of polling one device. Discovery is true for a full discovery. A status poll (false)
+// reports the system details, interface status and counters, and resources only: interfaces carry just their index,
+// name, speed, status and counters, and neighbors are empty, so the polling server merges it into the last discovery.
 type PollResult struct {
 	DeviceID       string      `json:"deviceID"`
+	Discovery      bool        `json:"discovery"`
 	PolledAt       time.Time   `json:"polledAt"`
 	PollDurationMS int64       `json:"pollDurationMS"`
 	Online         bool        `json:"online"`

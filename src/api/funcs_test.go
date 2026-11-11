@@ -1,7 +1,9 @@
 package api
 
 import (
+	"compress/gzip"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -64,5 +66,59 @@ func TestClientReportsEveryFailure(t *testing.T) {
 
 	if _, err := client.FetchDevices(context.Background()); err == nil || hits.Load() != 2 {
 		t.Fatalf("expected both servers to be tried and the request to fail, got %d requests and %v", hits.Load(), err)
+	}
+}
+
+func TestClientCompressesOnlyForServersThatAcceptGzip(t *testing.T) {
+	for _, advertises := range []bool{true, false} {
+		var encoding atomic.Value
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if advertises {
+				w.Header().Set("Accept-Encoding", "gzip")
+			}
+
+			if r.Method == http.MethodPost {
+				encoding.Store(r.Header.Get("Content-Encoding"))
+
+				body := r.Body
+
+				if r.Header.Get("Content-Encoding") == "gzip" {
+					reader, err := gzip.NewReader(r.Body)
+
+					if err != nil {
+						t.Errorf("expected a valid gzip body, got %v", err)
+
+						return
+					}
+
+					body = reader
+				}
+
+				var decoded submitResultsBody
+
+				if err := json.NewDecoder(body).Decode(&decoded); err != nil || len(decoded.Results) != 1 {
+					t.Errorf("expected the body to decode to one result, got %v", err)
+				}
+			}
+
+			w.Write([]byte(`{"pollInterval":60,"devices":[],"accepted":1}`))
+		}))
+
+		t.Cleanup(server.Close)
+
+		client := New([]string{server.URL}, "token", "test", time.Second)
+
+		if _, err := client.FetchDevices(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := client.SubmitResults(context.Background(), []PollResult{{DeviceID: "device"}}); err != nil {
+			t.Fatal(err)
+		}
+
+		if expected := map[bool]string{true: "gzip", false: ""}[advertises]; encoding.Load() != expected {
+			t.Fatalf("expected Content-Encoding %q when the server advertises gzip is %v, got %q", expected, advertises, encoding.Load())
+		}
 	}
 }

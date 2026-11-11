@@ -5,8 +5,10 @@ The open source polling agent for [Backbone NMS](https://backbonenms.com). Deplo
 ## How it works
 
 1. Every polling interval, the poller asks a polling server for the devices assigned to it (`GET /api/poller/devices`), authenticated with the access token you generated on the dashboard's **Pollers** page. The interval itself is an organization setting on the dashboard, so it can be changed without touching the poller.
-2. Each device is pinged (three echoes, for reachability and latency) and walked over SNMP v1, v2c or v3 with the credentials stored on the dashboard. A device can have several credentials to try (the organization's shared communities, for example): they are tried in the order the polling server sends them until one answers, and the poller reports which one worked so it is put first next time. Up to `snmp.concurrency` devices are polled at once.
-3. Results are pushed back to the polling server in batches (`POST /api/poller/results`).
+2. Each device is pinged (three echoes, for reachability and latency) and polled over SNMP v1, v2c or v3 with the credentials stored on the dashboard. A device can have several credentials to try (the organization's shared communities, for example): they are tried in the order the polling server sends them until one answers, and the poller reports which one worked so it is put first next time. Up to `snmp.concurrency` devices are polled at once. Only the table columns the dashboard uses are requested, since some agents (Juniper EX switches especially) answer slowly per value, and a device that did not answer SNMP on its last poll is probed without retries.
+
+   Every device gets a **status poll** each cycle: the system details, interface status and traffic counters, and CPU, memory and storage. A **full discovery** also walks the tables that rarely change (IP addresses, LLDP neighbors, inventory and transceiver light levels). The polling server marks the devices due for discovery in the device list, and the poller discovers them in the background, up to `snmp.discovery_concurrency` at a time, with requested rediscoveries first, then devices never discovered, then the ones discovered longest ago. A device being discovered is left out of that cycle's status poll.
+3. Results are pushed back to the polling server in batches (`POST /api/poller/results`), several at a time and gzip compressed when the server supports it. Uploads run alongside polling, so a slow upload does not hold up polling.
 
 Several polling server URLs can be configured. The poller keeps using the one that answered last and fails over to the others, in order, when it cannot be reached or responds with a server error. Resubmitting a batch to another server after a timeout is safe, as the servers ignore results they already stored.
 
@@ -59,7 +61,8 @@ Settings are read from `config.yml` in the working directory, if it exists. Envi
 | `polling_server.urls` | `POLLING_SERVER_URLS` (comma-separated) | | Base URLs of the polling servers, tried in order |
 | `polling_server.token` | `POLLING_SERVER_TOKEN` | | Poller access token from the dashboard's **Pollers** page |
 | `polling_server.timeout` | | `30s` | Timeout for each request to a polling server |
-| `snmp.concurrency` | | `32` | Maximum number of devices polled at the same time |
+| `snmp.concurrency` | | `128` | Maximum number of devices polled at the same time. Polling is mostly waiting on the network, so this can go higher for large networks |
+| `snmp.discovery_concurrency` | | `4` | Maximum number of devices fully discovered at the same time, in the background |
 | `snmp.timeout` | | `5s` | Timeout for each SNMP request |
 | `snmp.retries` | | `1` | Retries for each SNMP request |
 

@@ -100,13 +100,13 @@ func collectOptics(client *gosnmp.GoSNMP, enterpriseNumber string, physicalRows 
 
 	switch enterpriseNumber {
 	case enterpriseJuniper:
-		laneRows, err := walkTable(client, oidJuniperDOMLaneEntry)
+		laneRows, err := walkTable(client, oidJuniperDOMLaneEntry, 6, 8)
 
 		if err != nil {
 			return err
 		}
 
-		rows, err := walkTable(client, oidJuniperDOMEntry)
+		rows, err := walkTable(client, oidJuniperDOMEntry, 5, 7, 9, 10, 17, 18)
 
 		if err != nil {
 			return err
@@ -114,7 +114,7 @@ func collectOptics(client *gosnmp.GoSNMP, enterpriseNumber string, physicalRows 
 
 		juniperReadings(rows, laneRows, readings)
 	case enterpriseMikroTik:
-		rows, err := walkTable(client, oidMikroTikOpticalEntry)
+		rows, err := walkTable(client, oidMikroTikOpticalEntry, 2, 9, 10)
 
 		if err != nil {
 			return err
@@ -139,7 +139,7 @@ func collectOptics(client *gosnmp.GoSNMP, enterpriseNumber string, physicalRows 
 
 	for _, oid := range sensorTables {
 		cisco := oid == oidCiscoEntitySensorEntry
-		sensorRows, err := walkTable(client, oid)
+		sensorRows, err := walkTable(client, oid, sensorColumns(cisco)...)
 
 		if err != nil {
 			return err
@@ -150,7 +150,7 @@ func collectOptics(client *gosnmp.GoSNMP, enterpriseNumber string, physicalRows 
 		}
 
 		if aliasRows == nil {
-			if aliasRows, err = walkTable(client, oidEntityAliasMappingEntry); err != nil {
+			if aliasRows, err = walkTable(client, oidEntityAliasMappingEntry, 2); err != nil {
 				return err
 			}
 		}
@@ -158,7 +158,7 @@ func collectOptics(client *gosnmp.GoSNMP, enterpriseNumber string, physicalRows 
 		var thresholdRows map[string]snmpRow
 
 		if cisco {
-			if thresholdRows, err = walkTable(client, oidCiscoSensorThreshold); err != nil {
+			if thresholdRows, err = walkTable(client, oidCiscoSensorThreshold, 3, 4); err != nil {
 				return err
 			}
 		}
@@ -262,6 +262,16 @@ func hasOpticalSensors(sensorRows map[string]snmpRow, cisco bool) bool {
 	}
 
 	return false
+}
+
+// sensorColumns lists the sensor table columns read: type, scale, precision, value and status in both tables, plus the
+// units label of ENTITY-SENSOR-MIB or the measured entity of CISCO-ENTITY-SENSOR-MIB
+func sensorColumns(cisco bool) []int {
+	if cisco {
+		return []int{1, 2, 3, 4, 5, 8}
+	}
+
+	return []int{1, 2, 3, 4, 5, 6}
 }
 
 // sensorDBm returns the value of an optical power sensor in dBm. Cisco reports optical power as dBm directly, while
