@@ -42,11 +42,11 @@ const (
 
 type snmpRow map[int]gosnmp.SnmpPDU
 
-func NewSNMPClient(ctx context.Context, target string, settings dashboard.DeviceSNMP) (*gosnmp.GoSNMP, error) {
+func NewSNMPClient(ctx context.Context, target string, port uint16, settings dashboard.SNMPCredential) (*gosnmp.GoSNMP, error) {
 	client := &gosnmp.GoSNMP{
 		Context:   ctx,
 		Target:    target,
-		Port:      settings.Port,
+		Port:      port,
 		Transport: "udp",
 		Timeout:   conf.SNMP.Timeout,
 		Retries:   conf.SNMP.Retries,
@@ -78,7 +78,7 @@ func NewSNMPClient(ctx context.Context, target string, settings dashboard.Device
 	return client, nil
 }
 
-func snmpSecurityParameters(settings dashboard.DeviceSNMP) (gosnmp.SnmpV3MsgFlags, *gosnmp.UsmSecurityParameters, error) {
+func snmpSecurityParameters(settings dashboard.SNMPCredential) (gosnmp.SnmpV3MsgFlags, *gosnmp.UsmSecurityParameters, error) {
 	if len(settings.Username) < 1 {
 		return 0, nil, errors.New("snmpSecurityParameters: a username is required for SNMP version 3")
 	}
@@ -157,10 +157,11 @@ func snmpPrivacyProtocol(name string) (gosnmp.SnmpV3PrivProtocol, error) {
 }
 
 type snmpData struct {
-	System     *dashboard.System
-	Interfaces []dashboard.Interface
-	Neighbors  []dashboard.Neighbor
-	Resources  *dashboard.Resources
+	CredentialID *string
+	System       *dashboard.System
+	Interfaces   []dashboard.Interface
+	Neighbors    []dashboard.Neighbor
+	Resources    *dashboard.Resources
 }
 
 type inventoryItem struct {
@@ -173,24 +174,61 @@ type inventoryItem struct {
 	SoftwareVersion string
 }
 
-func CollectSNMPData(ctx context.Context, device dashboard.Device, polledAt time.Time) (*snmpData, error) {
-	client, err := NewSNMPClient(ctx, device.Host, device.SNMP)
-
-	if err != nil {
-		return nil, err
+// connectSNMP tries each of the device's credentials in order and returns a connected client for the first one the agent
+// answers, along with the system details it returned. Agents silently drop requests with an unknown community, so a wrong
+// credential costs one SNMP timeout before the next one is tried.
+func connectSNMP(ctx context.Context, device dashboard.Device) (*gosnmp.GoSNMP, *dashboard.System, *string, error) {
+	if len(device.SNMP.Credentials) < 1 {
+		return nil, nil, nil, errors.New("connectSNMP: no SNMP credentials are configured for this device")
 	}
 
-	if err = client.Connect(); err != nil {
+	var lastErr error
+
+	for _, credential := range device.SNMP.Credentials {
+		client, err := NewSNMPClient(ctx, device.Host, device.SNMP.Port, credential)
+
+		if err != nil {
+			lastErr = err
+
+			continue
+		}
+
+		if err = client.Connect(); err != nil {
+			lastErr = err
+
+			continue
+		}
+
+		system, err := collectSystem(client)
+
+		if err == nil {
+			return client, system, credential.ID, nil
+		}
+
+		client.Conn.Close()
+
+		if ctx.Err() != nil {
+			return nil, nil, nil, ctx.Err()
+		}
+
+		lastErr = err
+	}
+
+	if len(device.SNMP.Credentials) == 1 {
+		return nil, nil, nil, lastErr
+	}
+
+	return nil, nil, nil, fmt.Errorf("connectSNMP: none of the %d SNMP credentials received a response, last error: %w", len(device.SNMP.Credentials), lastErr)
+}
+
+func CollectSNMPData(ctx context.Context, device dashboard.Device, polledAt time.Time) (*snmpData, error) {
+	client, system, credentialID, err := connectSNMP(ctx, device)
+
+	if err != nil {
 		return nil, err
 	}
 
 	defer client.Conn.Close()
-
-	system, err := collectSystem(client)
-
-	if err != nil {
-		return nil, err
-	}
 
 	interfaces, err := collectInterfaces(client, polledAt.Add(-time.Duration(system.UptimeSeconds)*time.Second))
 
@@ -219,10 +257,11 @@ func CollectSNMPData(ctx context.Context, device dashboard.Device, polledAt time
 	applyHardwareDetails(system, inventory)
 
 	return &snmpData{
-		System:     system,
-		Interfaces: interfaces,
-		Neighbors:  neighbors,
-		Resources:  resources,
+		CredentialID: credentialID,
+		System:       system,
+		Interfaces:   interfaces,
+		Neighbors:    neighbors,
+		Resources:    resources,
 	}, nil
 }
 

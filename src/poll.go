@@ -138,6 +138,7 @@ func PollDevice(ctx context.Context, device dashboard.Device, interval time.Dura
 	}
 
 	result.Online = true
+	result.CredentialID = data.CredentialID
 	result.System = data.System
 	result.Interfaces = data.Interfaces
 	result.Neighbors = data.Neighbors

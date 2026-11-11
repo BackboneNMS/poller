@@ -49,14 +49,21 @@ type Device struct {
 }
 
 type DeviceSNMP struct {
-	Version         string `json:"version"`
-	Port            uint16 `json:"port"`
-	Community       string `json:"community"`
-	Username        string `json:"username"`
-	AuthProtocol    string `json:"authProtocol"`
-	AuthPassword    string `json:"authPassword"`
-	PrivacyProtocol string `json:"privacyProtocol"`
-	PrivacyPassword string `json:"privacyPassword"`
+	Port        uint16           `json:"port"`
+	Credentials []SNMPCredential `json:"credentials"`
+}
+
+// SNMPCredential is one set of credentials to try, in the order the dashboard sends them. ID is nil for credentials that
+// belong to a single device, and set for the organization's shared credentials.
+type SNMPCredential struct {
+	ID              *string `json:"id"`
+	Version         string  `json:"version"`
+	Community       string  `json:"community"`
+	Username        string  `json:"username"`
+	AuthProtocol    string  `json:"authProtocol"`
+	AuthPassword    string  `json:"authPassword"`
+	PrivacyProtocol string  `json:"privacyProtocol"`
+	PrivacyPassword string  `json:"privacyPassword"`
 }
 
 type PollResult struct {
@@ -66,6 +73,7 @@ type PollResult struct {
 	Online         bool        `json:"online"`
 	Reachable      bool        `json:"reachable"`
 	LatencyMS      *float64    `json:"latencyMS"`
+	CredentialID   *string     `json:"credentialID"`
 	Error          *string     `json:"error"`
 	System         *System     `json:"system"`
 	Interfaces     []Interface `json:"interfaces"`

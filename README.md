@@ -5,7 +5,7 @@ The open source polling agent for [Backbone NMS](https://backbonenms.com). Deplo
 ## How it works
 
 1. Every polling interval, the poller asks the dashboard for the devices assigned to it (`GET /api/poller/devices`), authenticated with the access token you generated on the dashboard's **Pollers** page. The interval itself is an organization setting on the dashboard, so it can be changed without touching the poller.
-2. Each device is pinged (three echoes, for reachability and latency) and walked over SNMP v1, v2c or v3 with the credentials stored on the dashboard. Up to `snmp.concurrency` devices are polled at once.
+2. Each device is pinged (three echoes, for reachability and latency) and walked over SNMP v1, v2c or v3 with the credentials stored on the dashboard. A device can have several credentials to try (the organization's shared communities, for example): they are tried in the order the dashboard sends them until one answers, and the poller reports which one worked so the dashboard puts it first next time. Up to `snmp.concurrency` devices are polled at once.
 3. Results are pushed back to the dashboard in batches (`POST /api/poller/results`).
 
 Only outbound HTTPS to the dashboard is required. Interface throughput is calculated on the poller from the difference in octet counters between polls, so the first poll after a restart reports counters without rates.
