@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"main/src/dashboard"
+	"main/src/api"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -30,7 +30,7 @@ func PollAllDevices(ctx context.Context) time.Duration {
 	list, err := client.FetchDevices(ctx)
 
 	if err != nil {
-		logger.Error("Failed to fetch device list from dashboard", "error", err)
+		logger.Error("Failed to fetch device list from polling server", "error", err)
 
 		return retryDelay
 	}
@@ -44,7 +44,7 @@ func PollAllDevices(ctx context.Context) time.Duration {
 		submitted sync.WaitGroup
 		failed    atomic.Int64
 		slots     = make(chan struct{}, conf.SNMP.Concurrency)
-		results   = make(chan dashboard.PollResult, submitBatchSize)
+		results   = make(chan api.PollResult, submitBatchSize)
 	)
 
 	submitted.Go(func() { submitResults(ctx, results) })
@@ -88,8 +88,8 @@ func PollAllDevices(ctx context.Context) time.Duration {
 	return interval
 }
 
-func submitResults(ctx context.Context, results <-chan dashboard.PollResult) {
-	batch := make([]dashboard.PollResult, 0, submitBatchSize)
+func submitResults(ctx context.Context, results <-chan api.PollResult) {
+	batch := make([]api.PollResult, 0, submitBatchSize)
 
 	flush := func() {
 		if len(batch) < 1 {
@@ -97,7 +97,7 @@ func submitResults(ctx context.Context, results <-chan dashboard.PollResult) {
 		}
 
 		if err := client.SubmitResults(ctx, batch); err != nil {
-			logger.Error("Failed to submit poll results to dashboard", "count", len(batch), "error", err)
+			logger.Error("Failed to submit poll results to polling server", "count", len(batch), "error", err)
 		}
 
 		batch = batch[:0]
@@ -114,21 +114,21 @@ func submitResults(ctx context.Context, results <-chan dashboard.PollResult) {
 	flush()
 }
 
-func PollDevice(ctx context.Context, device dashboard.Device, interval time.Duration) dashboard.PollResult {
+func PollDevice(ctx context.Context, device api.Device, interval time.Duration) api.PollResult {
 	polledAt := time.Now()
 
 	online, latency := PingHost(ctx, device.Host)
 	data, pollErr := CollectSNMPData(ctx, device, polledAt)
 
-	result := dashboard.PollResult{
+	result := api.PollResult{
 		DeviceID:       device.ID,
 		PolledAt:       polledAt,
 		PollDurationMS: time.Since(polledAt).Milliseconds(),
 		Online:         online,
 		Reachable:      pollErr == nil,
 		LatencyMS:      latency,
-		Interfaces:     make([]dashboard.Interface, 0),
-		Neighbors:      make([]dashboard.Neighbor, 0),
+		Interfaces:     make([]api.Interface, 0),
+		Neighbors:      make([]api.Neighbor, 0),
 	}
 
 	if pollErr != nil {
@@ -149,7 +149,7 @@ func PollDevice(ctx context.Context, device dashboard.Device, interval time.Dura
 	return result
 }
 
-func pruneSamples(devices []dashboard.Device) {
+func pruneSamples(devices []api.Device) {
 	active := make(map[string]struct{}, len(devices))
 
 	for _, device := range devices {
@@ -166,7 +166,7 @@ func pruneSamples(devices []dashboard.Device) {
 	}
 }
 
-func calculateInterfaceRates(result *dashboard.PollResult, interval time.Duration) {
+func calculateInterfaceRates(result *api.PollResult, interval time.Duration) {
 	current := counterSample{
 		polledAt:      result.PolledAt,
 		uptimeSeconds: result.System.UptimeSeconds,

@@ -1,7 +1,7 @@
 package main
 
 import (
-	"main/src/dashboard"
+	"main/src/api"
 	"math"
 	"regexp"
 	"slices"
@@ -52,8 +52,8 @@ type opticalReadings map[int]*opticalLanes
 type opticalLanes struct {
 	receive            map[int]float64
 	transmit           map[int]float64
-	receiveThresholds  *dashboard.OpticalThresholds
-	transmitThresholds *dashboard.OpticalThresholds
+	receiveThresholds  *api.OpticalThresholds
+	transmitThresholds *api.OpticalThresholds
 }
 
 func (r opticalReadings) add(interfaceIndex, lane int, receive bool, dBm float64) {
@@ -79,7 +79,7 @@ func (r opticalReadings) setThresholds(interfaceIndex int, receive bool, lowDBm,
 		return
 	}
 
-	thresholds := &dashboard.OpticalThresholds{LowDBm: roundDBm(lowDBm), HighDBm: roundDBm(highDBm)}
+	thresholds := &api.OpticalThresholds{LowDBm: roundDBm(lowDBm), HighDBm: roundDBm(highDBm)}
 
 	if receive {
 		lanes.receiveThresholds = thresholds
@@ -95,7 +95,7 @@ func roundDBm(value float64) float64 {
 // collectOptics adds transceiver light levels to the interfaces they belong to. Vendors expose them differently:
 // Juniper and MikroTik in their own tables indexed by interface, everyone else as sensors in the ENTITY-SENSOR-MIB
 // (or Cisco's variant of it) that have to be traced through the ENTITY-MIB hierarchy back to an interface.
-func collectOptics(client *gosnmp.GoSNMP, enterpriseNumber string, physicalRows map[string]snmpRow, interfaces []dashboard.Interface) error {
+func collectOptics(client *gosnmp.GoSNMP, enterpriseNumber string, physicalRows map[string]snmpRow, interfaces []api.Interface) error {
 	readings := make(opticalReadings)
 
 	switch enterpriseNumber {
@@ -232,7 +232,7 @@ func juniperThresholds(readings opticalReadings, interfaceIndex int, receive boo
 
 // mikroTikReadings reads MIKROTIK-MIB mtxrOpticalTable, which reports levels in thousandths of a dBm. Rows are
 // matched to interfaces by name, falling back to the row index as the interface index.
-func mikroTikReadings(rows map[string]snmpRow, interfaces []dashboard.Interface, readings opticalReadings) {
+func mikroTikReadings(rows map[string]snmpRow, interfaces []api.Interface, readings opticalReadings) {
 	for index, row := range rows {
 		interfaceIndex, err := strconv.Atoi(index)
 
@@ -305,7 +305,7 @@ func sensorValueDBm(row snmpRow, value int64, cisco bool) (float64, bool) {
 // its name says whether it measures received or transmitted light. It belongs to the interface that the sensor (or
 // the entity Cisco says it measures, or the closest entity containing it) is mapped to in entAliasMappingTable, or
 // whose name matches the entity's name. Alarm thresholds are only available from Cisco's threshold table.
-func entitySensorReadings(sensorRows map[string]snmpRow, cisco bool, physicalRows, aliasRows, thresholdRows map[string]snmpRow, interfaces []dashboard.Interface, readings opticalReadings) {
+func entitySensorReadings(sensorRows map[string]snmpRow, cisco bool, physicalRows, aliasRows, thresholdRows map[string]snmpRow, interfaces []api.Interface, readings opticalReadings) {
 	entityInterfaces := aliasInterfaceIndexes(aliasRows)
 	sensorThresholds := groupSensorThresholds(thresholdRows)
 
@@ -413,7 +413,7 @@ func aliasInterfaceIndexes(aliasRows map[string]snmpRow) map[string]int {
 	return result
 }
 
-func resolveEntityInterface(entityIndex string, physicalRows map[string]snmpRow, entityInterfaces map[string]int, interfaces []dashboard.Interface) (int, bool) {
+func resolveEntityInterface(entityIndex string, physicalRows map[string]snmpRow, entityInterfaces map[string]int, interfaces []api.Interface) (int, bool) {
 	for depth := 0; depth < maxEntityDepth && entityIndex != "0" && len(entityIndex) > 0; depth++ {
 		if interfaceIndex, ok := entityInterfaces[entityIndex]; ok {
 			return interfaceIndex, true
@@ -429,7 +429,7 @@ func resolveEntityInterface(entityIndex string, physicalRows map[string]snmpRow,
 	return 0, false
 }
 
-func findInterfaceByName(interfaces []dashboard.Interface, name string) *dashboard.Interface {
+func findInterfaceByName(interfaces []api.Interface, name string) *api.Interface {
 	if len(name) < 1 {
 		return nil
 	}
@@ -443,7 +443,7 @@ func findInterfaceByName(interfaces []dashboard.Interface, name string) *dashboa
 	return nil
 }
 
-func applyOptics(interfaces []dashboard.Interface, readings opticalReadings) {
+func applyOptics(interfaces []api.Interface, readings opticalReadings) {
 	for i := range interfaces {
 		lanes := readings[interfaces[i].Index]
 
@@ -451,7 +451,7 @@ func applyOptics(interfaces []dashboard.Interface, readings opticalReadings) {
 			continue
 		}
 
-		interfaces[i].Optical = &dashboard.Optical{
+		interfaces[i].Optical = &api.Optical{
 			RxPowerDBm:   laneValues(lanes.receive),
 			TxPowerDBm:   laneValues(lanes.transmit),
 			RxThresholds: lanes.receiveThresholds,

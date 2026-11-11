@@ -5,7 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"main/src/dashboard"
+	"main/src/api"
 	"net"
 	"slices"
 	"strconv"
@@ -42,7 +42,7 @@ const (
 
 type snmpRow map[int]gosnmp.SnmpPDU
 
-func NewSNMPClient(ctx context.Context, target string, port uint16, settings dashboard.SNMPCredential) (*gosnmp.GoSNMP, error) {
+func NewSNMPClient(ctx context.Context, target string, port uint16, settings api.SNMPCredential) (*gosnmp.GoSNMP, error) {
 	client := &gosnmp.GoSNMP{
 		Context:   ctx,
 		Target:    target,
@@ -54,13 +54,13 @@ func NewSNMPClient(ctx context.Context, target string, port uint16, settings das
 	}
 
 	switch settings.Version {
-	case dashboard.SNMPVersion1:
+	case api.SNMPVersion1:
 		client.Version = gosnmp.Version1
 		client.Community = settings.Community
-	case dashboard.SNMPVersion2C:
+	case api.SNMPVersion2C:
 		client.Version = gosnmp.Version2c
 		client.Community = settings.Community
-	case dashboard.SNMPVersion3:
+	case api.SNMPVersion3:
 		flags, parameters, err := snmpSecurityParameters(settings)
 
 		if err != nil {
@@ -78,7 +78,7 @@ func NewSNMPClient(ctx context.Context, target string, port uint16, settings das
 	return client, nil
 }
 
-func snmpSecurityParameters(settings dashboard.SNMPCredential) (gosnmp.SnmpV3MsgFlags, *gosnmp.UsmSecurityParameters, error) {
+func snmpSecurityParameters(settings api.SNMPCredential) (gosnmp.SnmpV3MsgFlags, *gosnmp.UsmSecurityParameters, error) {
 	if len(settings.Username) < 1 {
 		return 0, nil, errors.New("snmpSecurityParameters: a username is required for SNMP version 3")
 	}
@@ -158,10 +158,10 @@ func snmpPrivacyProtocol(name string) (gosnmp.SnmpV3PrivProtocol, error) {
 
 type snmpData struct {
 	CredentialID *string
-	System       *dashboard.System
-	Interfaces   []dashboard.Interface
-	Neighbors    []dashboard.Neighbor
-	Resources    *dashboard.Resources
+	System       *api.System
+	Interfaces   []api.Interface
+	Neighbors    []api.Neighbor
+	Resources    *api.Resources
 }
 
 type inventoryItem struct {
@@ -177,7 +177,7 @@ type inventoryItem struct {
 // connectSNMP tries each of the device's credentials in order and returns a connected client for the first one the agent
 // answers, along with the system details it returned. Agents silently drop requests with an unknown community, so a wrong
 // credential costs one SNMP timeout before the next one is tried.
-func connectSNMP(ctx context.Context, device dashboard.Device) (*gosnmp.GoSNMP, *dashboard.System, *string, error) {
+func connectSNMP(ctx context.Context, device api.Device) (*gosnmp.GoSNMP, *api.System, *string, error) {
 	if len(device.SNMP.Credentials) < 1 {
 		return nil, nil, nil, errors.New("connectSNMP: no SNMP credentials are configured for this device")
 	}
@@ -221,7 +221,7 @@ func connectSNMP(ctx context.Context, device dashboard.Device) (*gosnmp.GoSNMP, 
 	return nil, nil, nil, fmt.Errorf("connectSNMP: none of the %d SNMP credentials received a response, last error: %w", len(device.SNMP.Credentials), lastErr)
 }
 
-func CollectSNMPData(ctx context.Context, device dashboard.Device, polledAt time.Time) (*snmpData, error) {
+func CollectSNMPData(ctx context.Context, device api.Device, polledAt time.Time) (*snmpData, error) {
 	client, system, credentialID, err := connectSNMP(ctx, device)
 
 	if err != nil {
@@ -271,7 +271,7 @@ func CollectSNMPData(ctx context.Context, device dashboard.Device, polledAt time
 	}, nil
 }
 
-func collectSystem(client *gosnmp.GoSNMP) (*dashboard.System, error) {
+func collectSystem(client *gosnmp.GoSNMP) (*api.System, error) {
 	packet, err := client.Get([]string{
 		oidSystemDescription,
 		oidSystemObjectID,
@@ -289,7 +289,7 @@ func collectSystem(client *gosnmp.GoSNMP) (*dashboard.System, error) {
 		return nil, fmt.Errorf("collectSystem: agent responded with error %s", packet.Error)
 	}
 
-	system := &dashboard.System{}
+	system := &api.System{}
 
 	for _, pdu := range packet.Variables {
 		switch strings.TrimPrefix(pdu.Name, ".") {
@@ -311,7 +311,7 @@ func collectSystem(client *gosnmp.GoSNMP) (*dashboard.System, error) {
 	return system, nil
 }
 
-func collectInterfaces(client *gosnmp.GoSNMP, bootedAt time.Time) ([]dashboard.Interface, error) {
+func collectInterfaces(client *gosnmp.GoSNMP, bootedAt time.Time) ([]api.Interface, error) {
 	rows, err := walkTable(client, oidInterfaceEntry)
 
 	if err != nil {
@@ -330,7 +330,7 @@ func collectInterfaces(client *gosnmp.GoSNMP, bootedAt time.Time) ([]dashboard.I
 		return nil, err
 	}
 
-	interfaces := make([]dashboard.Interface, 0, len(rows))
+	interfaces := make([]api.Interface, 0, len(rows))
 
 	for index, row := range rows {
 		interfaceIndex, err := strconv.Atoi(index)
@@ -342,7 +342,7 @@ func collectInterfaces(client *gosnmp.GoSNMP, bootedAt time.Time) ([]dashboard.I
 		extensionRow := extensionRows[index]
 		ianaType := int(rowInt(row, 3))
 
-		item := dashboard.Interface{
+		item := api.Interface{
 			Index:              interfaceIndex,
 			Name:               rowString(extensionRow, 1),
 			Description:        rowString(row, 2),
@@ -374,7 +374,7 @@ func collectInterfaces(client *gosnmp.GoSNMP, bootedAt time.Time) ([]dashboard.I
 		interfaces = append(interfaces, item)
 	}
 
-	slices.SortFunc(interfaces, func(a, b dashboard.Interface) int {
+	slices.SortFunc(interfaces, func(a, b api.Interface) int {
 		return a.Index - b.Index
 	})
 
@@ -411,7 +411,7 @@ func collectIPAddresses(client *gosnmp.GoSNMP) (map[int][]string, error) {
 	return addresses, nil
 }
 
-func collectNeighbors(client *gosnmp.GoSNMP, interfaces []dashboard.Interface) ([]dashboard.Neighbor, error) {
+func collectNeighbors(client *gosnmp.GoSNMP, interfaces []api.Interface) ([]api.Neighbor, error) {
 	localPorts, err := walkTable(client, oidLLDPLocalPortEntry)
 
 	if err != nil {
@@ -430,7 +430,7 @@ func collectNeighbors(client *gosnmp.GoSNMP, interfaces []dashboard.Interface) (
 		return nil, err
 	}
 
-	neighbors := make([]dashboard.Neighbor, 0, len(rows))
+	neighbors := make([]api.Neighbor, 0, len(rows))
 
 	for index, row := range rows {
 		parts := strings.Split(index, ".")
@@ -441,7 +441,7 @@ func collectNeighbors(client *gosnmp.GoSNMP, interfaces []dashboard.Interface) (
 
 		localPort := localPorts[parts[1]]
 
-		item := dashboard.Neighbor{
+		item := api.Neighbor{
 			LocalPortID:          lldpIdentifier(rowInt(localPort, 2), rowBytes(localPort, 3), 3, 4),
 			LocalPortDescription: rowString(localPort, 4),
 			ChassisID:            lldpIdentifier(rowInt(row, 4), rowBytes(row, 5), 4, 5),
@@ -461,7 +461,7 @@ func collectNeighbors(client *gosnmp.GoSNMP, interfaces []dashboard.Interface) (
 		neighbors = append(neighbors, item)
 	}
 
-	slices.SortFunc(neighbors, func(a, b dashboard.Neighbor) int {
+	slices.SortFunc(neighbors, func(a, b api.Neighbor) int {
 		if c := strings.Compare(a.LocalPortID, b.LocalPortID); c != 0 {
 			return c
 		}
@@ -561,7 +561,7 @@ func collectInventory(rows map[string]snmpRow) []inventoryItem {
 	return inventory
 }
 
-func collectResources(client *gosnmp.GoSNMP) (*dashboard.Resources, error) {
+func collectResources(client *gosnmp.GoSNMP) (*api.Resources, error) {
 	processors, err := walkTable(client, oidProcessorEntry)
 
 	if err != nil {
@@ -574,8 +574,8 @@ func collectResources(client *gosnmp.GoSNMP) (*dashboard.Resources, error) {
 		return nil, err
 	}
 
-	resources := &dashboard.Resources{
-		Storage: make([]dashboard.Storage, 0, len(rows)),
+	resources := &api.Resources{
+		Storage: make([]api.Storage, 0, len(rows)),
 	}
 
 	var (
@@ -603,7 +603,7 @@ func collectResources(client *gosnmp.GoSNMP) (*dashboard.Resources, error) {
 
 		allocationUnits := rowInt(row, 4)
 
-		resources.Storage = append(resources.Storage, dashboard.Storage{
+		resources.Storage = append(resources.Storage, api.Storage{
 			Index:       storageIndex,
 			Type:        storageType(rowString(row, 2)),
 			Description: rowString(row, 3),
@@ -612,12 +612,12 @@ func collectResources(client *gosnmp.GoSNMP) (*dashboard.Resources, error) {
 		})
 	}
 
-	slices.SortFunc(resources.Storage, func(a, b dashboard.Storage) int {
+	slices.SortFunc(resources.Storage, func(a, b api.Storage) int {
 		return a.Index - b.Index
 	})
 
 	for _, storage := range resources.Storage {
-		if storage.Type == dashboard.StorageTypeRAM {
+		if storage.Type == api.StorageTypeRAM {
 			resources.MemoryTotalBytes = PointerOf(storage.SizeBytes)
 			resources.MemoryUsedBytes = PointerOf(storage.UsedBytes)
 
@@ -628,7 +628,7 @@ func collectResources(client *gosnmp.GoSNMP) (*dashboard.Resources, error) {
 	return resources, nil
 }
 
-func applyHardwareDetails(system *dashboard.System, inventory []inventoryItem) {
+func applyHardwareDetails(system *api.System, inventory []inventoryItem) {
 	for _, item := range inventory {
 		if item.Class != inventoryClassChassis {
 			continue
@@ -867,7 +867,7 @@ func lldpIdentifier(subtype int64, value []byte, macAddressSubtype, networkAddre
 	return formatPrintableOrHex(value)
 }
 
-func lldpInterfaceIndex(localPortNumber, localPortID, localPortDescription string, interfaces []dashboard.Interface) *int {
+func lldpInterfaceIndex(localPortNumber, localPortID, localPortDescription string, interfaces []api.Interface) *int {
 	for _, candidate := range []string{localPortID, localPortDescription} {
 		if len(candidate) < 1 {
 			continue
@@ -914,44 +914,44 @@ func interfaceLastChangedAt(bootedAt time.Time, ticks int64) *time.Time {
 func interfaceStatus(value int64) string {
 	switch value {
 	case 1:
-		return dashboard.InterfaceStatusUp
+		return api.InterfaceStatusUp
 	case 2:
-		return dashboard.InterfaceStatusDown
+		return api.InterfaceStatusDown
 	case 3:
-		return dashboard.InterfaceStatusTesting
+		return api.InterfaceStatusTesting
 	case 5:
-		return dashboard.InterfaceStatusDormant
+		return api.InterfaceStatusDormant
 	case 6:
-		return dashboard.InterfaceStatusNotPresent
+		return api.InterfaceStatusNotPresent
 	case 7:
-		return dashboard.InterfaceStatusLowerLayerDown
+		return api.InterfaceStatusLowerLayerDown
 	default:
-		return dashboard.InterfaceStatusUnknown
+		return api.InterfaceStatusUnknown
 	}
 }
 
 func interfaceType(ianaType int) string {
 	switch ianaType {
 	case 6, 62, 69, 117:
-		return dashboard.InterfaceTypeEthernet
+		return api.InterfaceTypeEthernet
 	case 71:
-		return dashboard.InterfaceTypeWireless
+		return api.InterfaceTypeWireless
 	case 24:
-		return dashboard.InterfaceTypeLoopback
+		return api.InterfaceTypeLoopback
 	case 135, 136:
-		return dashboard.InterfaceTypeVLAN
+		return api.InterfaceTypeVLAN
 	case 161:
-		return dashboard.InterfaceTypeLAG
+		return api.InterfaceTypeLAG
 	case 131:
-		return dashboard.InterfaceTypeTunnel
+		return api.InterfaceTypeTunnel
 	case 209:
-		return dashboard.InterfaceTypeBridge
+		return api.InterfaceTypeBridge
 	case 23, 108:
-		return dashboard.InterfaceTypePPP
+		return api.InterfaceTypePPP
 	case 53:
-		return dashboard.InterfaceTypeVirtual
+		return api.InterfaceTypeVirtual
 	default:
-		return dashboard.InterfaceTypeOther
+		return api.InterfaceTypeOther
 	}
 }
 
@@ -966,16 +966,16 @@ func inventoryClass(value int64) string {
 func storageType(oid string) string {
 	switch strings.TrimPrefix(oid, oidStorageTypes+".") {
 	case "2":
-		return dashboard.StorageTypeRAM
+		return api.StorageTypeRAM
 	case "3":
-		return dashboard.StorageTypeVirtualMemory
+		return api.StorageTypeVirtualMemory
 	case "4":
-		return dashboard.StorageTypeFixedDisk
+		return api.StorageTypeFixedDisk
 	case "5":
-		return dashboard.StorageTypeRemovableDisk
+		return api.StorageTypeRemovableDisk
 	case "9":
-		return dashboard.StorageTypeFlash
+		return api.StorageTypeFlash
 	default:
-		return dashboard.StorageTypeOther
+		return api.StorageTypeOther
 	}
 }

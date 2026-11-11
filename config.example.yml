@@ -1,5 +1,6 @@
-dashboard:
-  url: https://app.backbonenms.com
+polling_server:
+  urls:
+    - https://poll.backbonenms.com
   token: ''
   timeout: 30s
 snmp:

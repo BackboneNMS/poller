@@ -1,4 +1,4 @@
-package dashboard
+package api
 
 import "time"
 
@@ -53,7 +53,7 @@ type DeviceSNMP struct {
 	Credentials []SNMPCredential `json:"credentials"`
 }
 
-// SNMPCredential is one set of credentials to try, in the order the dashboard sends them. ID is nil for credentials that
+// SNMPCredential is one set of credentials to try, in the order the polling server sends them. ID is nil for credentials that
 // belong to a single device, and set for the organization's shared credentials.
 type SNMPCredential struct {
 	ID              *string `json:"id"`

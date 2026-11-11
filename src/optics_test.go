@@ -1,7 +1,7 @@
 package main
 
 import (
-	"main/src/dashboard"
+	"main/src/api"
 	"slices"
 	"testing"
 
@@ -20,7 +20,7 @@ func objectID(value string) gosnmp.SnmpPDU {
 	return gosnmp.SnmpPDU{Type: gosnmp.ObjectIdentifier, Value: value}
 }
 
-func expectOptical(t *testing.T, interfaces []dashboard.Interface, index int, receive, transmit []float64) {
+func expectOptical(t *testing.T, interfaces []api.Interface, index int, receive, transmit []float64) {
 	t.Helper()
 
 	for _, item := range interfaces {
@@ -42,10 +42,10 @@ func expectOptical(t *testing.T, interfaces []dashboard.Interface, index int, re
 	t.Fatalf("interface %d not found", index)
 }
 
-func expectThresholds(t *testing.T, interfaces []dashboard.Interface, index int, receive, transmit *dashboard.OpticalThresholds) {
+func expectThresholds(t *testing.T, interfaces []api.Interface, index int, receive, transmit *api.OpticalThresholds) {
 	t.Helper()
 
-	equal := func(a, b *dashboard.OpticalThresholds) bool {
+	equal := func(a, b *api.OpticalThresholds) bool {
 		return a == nil && b == nil || a != nil && b != nil && *a == *b
 	}
 
@@ -68,8 +68,8 @@ func expectThresholds(t *testing.T, interfaces []dashboard.Interface, index int,
 	t.Fatalf("interface %d not found", index)
 }
 
-func testInterfaces() []dashboard.Interface {
-	return []dashboard.Interface{
+func testInterfaces() []api.Interface {
+	return []api.Interface{
 		{Index: 10, Name: "xe-0/0/0", Description: "xe-0/0/0"},
 		{Index: 11, Name: "et-0/0/1", Description: "et-0/0/1"},
 		{Index: 12, Name: "sfp-sfpplus1", Description: "sfp-sfpplus1"},
@@ -100,8 +100,8 @@ func TestJuniperReadings(t *testing.T) {
 	expectOptical(t, interfaces, 11, []float64{-2.05, -2.1}, []float64{1.1, 1.05})
 	expectOptical(t, interfaces, 14, []float64{-40}, []float64{0.5})
 
-	expectThresholds(t, interfaces, 10, &dashboard.OpticalThresholds{LowDBm: -14.4, HighDBm: 0.5}, nil)
-	expectThresholds(t, interfaces, 11, &dashboard.OpticalThresholds{LowDBm: -10.6, HighDBm: 4.5}, &dashboard.OpticalThresholds{LowDBm: -9.4, HighDBm: 5})
+	expectThresholds(t, interfaces, 10, &api.OpticalThresholds{LowDBm: -14.4, HighDBm: 0.5}, nil)
+	expectThresholds(t, interfaces, 11, &api.OpticalThresholds{LowDBm: -10.6, HighDBm: 4.5}, &api.OpticalThresholds{LowDBm: -9.4, HighDBm: 5})
 	expectThresholds(t, interfaces, 14, nil, nil)
 }
 
@@ -154,7 +154,7 @@ func TestCiscoSensorReadings(t *testing.T) {
 	applyOptics(interfaces, readings)
 
 	expectOptical(t, interfaces, 13, []float64{-4.5}, []float64{-2.1})
-	expectThresholds(t, interfaces, 13, &dashboard.OpticalThresholds{LowDBm: -17, HighDBm: 2}, nil)
+	expectThresholds(t, interfaces, 13, &api.OpticalThresholds{LowDBm: -17, HighDBm: 2}, nil)
 }
 
 func TestStandardSensorReadingsInWatts(t *testing.T) {
