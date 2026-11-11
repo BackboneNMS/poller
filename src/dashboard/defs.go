@@ -120,10 +120,19 @@ type Interface struct {
 	Optical            *Optical   `json:"optical"`
 }
 
-// Optical holds the transceiver light levels of an interface, with one value per lane (a single value for most optics).
+// Optical holds the transceiver light levels of an interface, with one value per lane (a single value for most optics),
+// and the alarm thresholds the transceiver defines for them when it reports any.
 type Optical struct {
-	RxPowerDBm []float64 `json:"rxPowerDBm"`
-	TxPowerDBm []float64 `json:"txPowerDBm"`
+	RxPowerDBm   []float64          `json:"rxPowerDBm"`
+	TxPowerDBm   []float64          `json:"txPowerDBm"`
+	RxThresholds *OpticalThresholds `json:"rxThresholds"`
+	TxThresholds *OpticalThresholds `json:"txThresholds"`
+}
+
+// OpticalThresholds are the low and high alarm thresholds of a light level, shared by every lane of the transceiver.
+type OpticalThresholds struct {
+	LowDBm  float64 `json:"lowDBm"`
+	HighDBm float64 `json:"highDBm"`
 }
 
 type Neighbor struct {

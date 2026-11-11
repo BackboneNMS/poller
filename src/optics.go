@@ -15,6 +15,7 @@ const (
 	oidEntityAliasMappingEntry = "1.3.6.1.2.1.47.1.3.2.1"
 	oidEntitySensorEntry       = "1.3.6.1.2.1.99.1.1.1"
 	oidCiscoEntitySensorEntry  = "1.3.6.1.4.1.9.9.91.1.1.1.1"
+	oidCiscoSensorThreshold    = "1.3.6.1.4.1.9.9.91.1.2.1.1"
 	oidJuniperDOMEntry         = "1.3.6.1.4.1.2636.3.60.1.1.1.1"
 	oidJuniperDOMLaneEntry     = "1.3.6.1.4.1.2636.3.60.1.2.1.1"
 	oidMikroTikOpticalEntry    = "1.3.6.1.4.1.14988.1.1.19.1.1"
@@ -28,6 +29,11 @@ const (
 	sensorTypeDBm   = 14
 	sensorStatusOK  = 1
 	sensorScaleUnit = 9
+
+	thresholdLessThan       = 1
+	thresholdLessOrEqual    = 2
+	thresholdGreaterThan    = 3
+	thresholdGreaterOrEqual = 4
 
 	// noLightDBm is the floor for reported light levels; transceivers report anything from -40 dBm to -inf without light
 	noLightDBm     = -40.0
@@ -44,8 +50,10 @@ var (
 type opticalReadings map[int]*opticalLanes
 
 type opticalLanes struct {
-	receive  map[int]float64
-	transmit map[int]float64
+	receive            map[int]float64
+	transmit           map[int]float64
+	receiveThresholds  *dashboard.OpticalThresholds
+	transmitThresholds *dashboard.OpticalThresholds
 }
 
 func (r opticalReadings) add(interfaceIndex, lane int, receive bool, dBm float64) {
@@ -53,13 +61,35 @@ func (r opticalReadings) add(interfaceIndex, lane int, receive bool, dBm float64
 		r[interfaceIndex] = &opticalLanes{receive: make(map[int]float64), transmit: make(map[int]float64)}
 	}
 
-	value := math.Round(math.Max(dBm, noLightDBm)*100) / 100
+	value := roundDBm(math.Max(dBm, noLightDBm))
 
 	if receive {
 		r[interfaceIndex].receive[lane] = value
 	} else {
 		r[interfaceIndex].transmit[lane] = value
 	}
+}
+
+// setThresholds records the alarm thresholds of an interface that has light levels. Empty ranges are ignored, since
+// that is how most optics without thresholds report them (as zeros).
+func (r opticalReadings) setThresholds(interfaceIndex int, receive bool, lowDBm, highDBm float64) {
+	lanes := r[interfaceIndex]
+
+	if lanes == nil || lowDBm >= highDBm {
+		return
+	}
+
+	thresholds := &dashboard.OpticalThresholds{LowDBm: roundDBm(lowDBm), HighDBm: roundDBm(highDBm)}
+
+	if receive {
+		lanes.receiveThresholds = thresholds
+	} else {
+		lanes.transmitThresholds = thresholds
+	}
+}
+
+func roundDBm(value float64) float64 {
+	return math.Round(value*100) / 100
 }
 
 // collectOptics adds transceiver light levels to the interfaces they belong to. Vendors expose them differently:
@@ -125,7 +155,15 @@ func collectOptics(client *gosnmp.GoSNMP, enterpriseNumber string, physicalRows 
 			}
 		}
 
-		entitySensorReadings(sensorRows, cisco, physicalRows, aliasRows, interfaces, readings)
+		var thresholdRows map[string]snmpRow
+
+		if cisco {
+			if thresholdRows, err = walkTable(client, oidCiscoSensorThreshold); err != nil {
+				return err
+			}
+		}
+
+		entitySensorReadings(sensorRows, cisco, physicalRows, aliasRows, thresholdRows, interfaces, readings)
 
 		if len(readings) > 0 {
 			break
@@ -138,7 +176,8 @@ func collectOptics(client *gosnmp.GoSNMP, enterpriseNumber string, physicalRows 
 }
 
 // juniperReadings reads JUNIPER-DOM-MIB, which reports levels in hundredths of a dBm. Multi-lane optics (QSFP) are
-// read per lane from the lane table, everything else from the per-interface table.
+// read per lane from the lane table, everything else from the per-interface table. Alarm thresholds only exist in the
+// per-interface table and apply to every lane.
 func juniperReadings(rows, laneRows map[string]snmpRow, readings opticalReadings) {
 	for index, row := range laneRows {
 		rawInterface, rawLane, ok := strings.Cut(index, ".")
@@ -161,17 +200,33 @@ func juniperReadings(rows, laneRows map[string]snmpRow, readings opticalReadings
 	for index, row := range rows {
 		interfaceIndex, err := strconv.Atoi(index)
 
-		if err != nil || readings[interfaceIndex] != nil {
+		if err != nil {
 			continue
 		}
 
-		if value, ok := rowNumber(row, 5); ok {
-			readings.add(interfaceIndex, 0, true, float64(value)/100)
+		if readings[interfaceIndex] == nil {
+			if value, ok := rowNumber(row, 5); ok {
+				readings.add(interfaceIndex, 0, true, float64(value)/100)
+			}
+
+			if value, ok := rowNumber(row, 7); ok {
+				readings.add(interfaceIndex, 0, false, float64(value)/100)
+			}
 		}
 
-		if value, ok := rowNumber(row, 7); ok {
-			readings.add(interfaceIndex, 0, false, float64(value)/100)
-		}
+		juniperThresholds(readings, interfaceIndex, true, row, 10, 9)
+		juniperThresholds(readings, interfaceIndex, false, row, 18, 17)
+	}
+}
+
+// juniperThresholds reads the low and high alarm thresholds of one light level from their columns in jnxDomCurrentTable
+// (receive power in 10 and 9, transmit power in 18 and 17)
+func juniperThresholds(readings opticalReadings, interfaceIndex int, receive bool, row snmpRow, lowColumn, highColumn int) {
+	low, lowOK := rowNumber(row, lowColumn)
+	high, highOK := rowNumber(row, highColumn)
+
+	if lowOK && highOK {
+		readings.setThresholds(interfaceIndex, receive, float64(low)/100, float64(high)/100)
 	}
 }
 
@@ -222,6 +277,12 @@ func sensorDBm(row snmpRow, cisco bool) (float64, bool) {
 		return 0, false
 	}
 
+	return sensorValueDBm(row, value, cisco)
+}
+
+// sensorValueDBm converts a raw value of an optical power sensor, either its reading or one of its thresholds, to dBm
+// using the sensor's type, scale and precision
+func sensorValueDBm(row snmpRow, value int64, cisco bool) (float64, bool) {
 	magnitude := float64(value) * math.Pow(10, float64(3*(rowInt(row, 2)-sensorScaleUnit))) / math.Pow(10, float64(rowInt(row, 3)))
 
 	switch {
@@ -243,9 +304,10 @@ func sensorDBm(row snmpRow, cisco bool) (float64, bool) {
 // entitySensorReadings matches optical power sensors to interfaces. A sensor is optical when its type is power and
 // its name says whether it measures received or transmitted light. It belongs to the interface that the sensor (or
 // the entity Cisco says it measures, or the closest entity containing it) is mapped to in entAliasMappingTable, or
-// whose name matches the entity's name.
-func entitySensorReadings(sensorRows map[string]snmpRow, cisco bool, physicalRows, aliasRows map[string]snmpRow, interfaces []dashboard.Interface, readings opticalReadings) {
+// whose name matches the entity's name. Alarm thresholds are only available from Cisco's threshold table.
+func entitySensorReadings(sensorRows map[string]snmpRow, cisco bool, physicalRows, aliasRows, thresholdRows map[string]snmpRow, interfaces []dashboard.Interface, readings opticalReadings) {
 	entityInterfaces := aliasInterfaceIndexes(aliasRows)
+	sensorThresholds := groupSensorThresholds(thresholdRows)
 
 	for index, row := range sensorRows {
 		dBm, ok := sensorDBm(row, cisco)
@@ -281,7 +343,53 @@ func entitySensorReadings(sensorRows map[string]snmpRow, cisco bool, physicalRow
 		}
 
 		readings.add(interfaceIndex, lane, receive, dBm)
+
+		if low, high, ok := sensorThresholdsDBm(row, cisco, sensorThresholds[index]); ok {
+			readings.setThresholds(interfaceIndex, receive, low, high)
+		}
 	}
+}
+
+// groupSensorThresholds groups the rows of CISCO-ENTITY-SENSOR-MIB entSensorThresholdTable, indexed by sensor and then
+// threshold, by the sensor they belong to
+func groupSensorThresholds(thresholdRows map[string]snmpRow) map[string][]snmpRow {
+	result := make(map[string][]snmpRow)
+
+	for index, row := range thresholdRows {
+		sensorIndex, _, _ := strings.Cut(index, ".")
+		result[sensorIndex] = append(result[sensorIndex], row)
+	}
+
+	return result
+}
+
+// sensorThresholdsDBm returns the alarm thresholds of a sensor: the lowest value it alarms below and the highest value it
+// alarms above. Warning thresholds sit inside those, so the outermost pair are the alarm thresholds.
+func sensorThresholdsDBm(row snmpRow, cisco bool, thresholdRows []snmpRow) (float64, float64, bool) {
+	low, high := math.Inf(1), math.Inf(-1)
+
+	for _, threshold := range thresholdRows {
+		raw, ok := rowNumber(threshold, 4)
+
+		if !ok {
+			continue
+		}
+
+		value, ok := sensorValueDBm(row, raw, cisco)
+
+		if !ok {
+			continue
+		}
+
+		switch rowInt(threshold, 3) {
+		case thresholdLessThan, thresholdLessOrEqual:
+			low = math.Min(low, value)
+		case thresholdGreaterThan, thresholdGreaterOrEqual:
+			high = math.Max(high, value)
+		}
+	}
+
+	return low, high, !math.IsInf(low, 0) && !math.IsInf(high, 0)
 }
 
 // aliasInterfaceIndexes maps physical entities to interface indexes using entAliasMappingIdentifier, which points at
@@ -344,8 +452,10 @@ func applyOptics(interfaces []dashboard.Interface, readings opticalReadings) {
 		}
 
 		interfaces[i].Optical = &dashboard.Optical{
-			RxPowerDBm: laneValues(lanes.receive),
-			TxPowerDBm: laneValues(lanes.transmit),
+			RxPowerDBm:   laneValues(lanes.receive),
+			TxPowerDBm:   laneValues(lanes.transmit),
+			RxThresholds: lanes.receiveThresholds,
+			TxThresholds: lanes.transmitThresholds,
 		}
 	}
 }

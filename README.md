@@ -21,6 +21,7 @@ Only outbound HTTPS to the dashboard is required. Interface throughput is calcul
 | CPU load, memory and storage usage | HOST-RESOURCES-MIB |
 | Directly connected neighbors | LLDP-MIB |
 | Transceiver receive and transmit light levels, per lane | ENTITY-SENSOR-MIB, CISCO-ENTITY-SENSOR-MIB, JUNIPER-DOM-MIB, MIKROTIK-MIB |
+| Transceiver low and high alarm thresholds for those light levels | CISCO-ENTITY-SENSOR-MIB, JUNIPER-DOM-MIB |
 
 ## Installation
 

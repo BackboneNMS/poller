@@ -42,6 +42,32 @@ func expectOptical(t *testing.T, interfaces []dashboard.Interface, index int, re
 	t.Fatalf("interface %d not found", index)
 }
 
+func expectThresholds(t *testing.T, interfaces []dashboard.Interface, index int, receive, transmit *dashboard.OpticalThresholds) {
+	t.Helper()
+
+	equal := func(a, b *dashboard.OpticalThresholds) bool {
+		return a == nil && b == nil || a != nil && b != nil && *a == *b
+	}
+
+	for _, item := range interfaces {
+		if item.Index != index {
+			continue
+		}
+
+		if item.Optical == nil {
+			t.Fatalf("interface %d: expected optical levels, got none", index)
+		}
+
+		if !equal(item.Optical.RxThresholds, receive) || !equal(item.Optical.TxThresholds, transmit) {
+			t.Fatalf("interface %d: expected thresholds rx %+v tx %+v, got rx %+v tx %+v", index, receive, transmit, item.Optical.RxThresholds, item.Optical.TxThresholds)
+		}
+
+		return
+	}
+
+	t.Fatalf("interface %d not found", index)
+}
+
 func testInterfaces() []dashboard.Interface {
 	return []dashboard.Interface{
 		{Index: 10, Name: "xe-0/0/0", Description: "xe-0/0/0"},
@@ -57,8 +83,8 @@ func TestJuniperReadings(t *testing.T) {
 	readings := make(opticalReadings)
 
 	rows := map[string]snmpRow{
-		"10": {5: integer(-312), 7: integer(-158)},
-		"11": {5: integer(-999), 7: integer(-999)},
+		"10": {5: integer(-312), 7: integer(-158), 9: integer(50), 10: integer(-1440), 17: integer(0), 18: integer(0)},
+		"11": {5: integer(-999), 7: integer(-999), 9: integer(450), 10: integer(-1060), 17: integer(500), 18: integer(-940)},
 		"14": {5: integer(-5000), 7: integer(50)},
 	}
 
@@ -73,6 +99,10 @@ func TestJuniperReadings(t *testing.T) {
 	expectOptical(t, interfaces, 10, []float64{-3.12}, []float64{-1.58})
 	expectOptical(t, interfaces, 11, []float64{-2.05, -2.1}, []float64{1.1, 1.05})
 	expectOptical(t, interfaces, 14, []float64{-40}, []float64{0.5})
+
+	expectThresholds(t, interfaces, 10, &dashboard.OpticalThresholds{LowDBm: -14.4, HighDBm: 0.5}, nil)
+	expectThresholds(t, interfaces, 11, &dashboard.OpticalThresholds{LowDBm: -10.6, HighDBm: 4.5}, &dashboard.OpticalThresholds{LowDBm: -9.4, HighDBm: 5})
+	expectThresholds(t, interfaces, 14, nil, nil)
 }
 
 func TestMikroTikReadings(t *testing.T) {
@@ -112,10 +142,19 @@ func TestCiscoSensorReadings(t *testing.T) {
 		t.Fatal("expected Cisco dBm sensors to be detected")
 	}
 
-	entitySensorReadings(sensorRows, true, physicalRows, aliasRows, interfaces, readings)
+	thresholdRows := map[string]snmpRow{
+		"1001.1": {2: integer(30), 3: integer(thresholdGreaterOrEqual), 4: integer(20)},
+		"1001.2": {2: integer(10), 3: integer(thresholdGreaterOrEqual), 4: integer(-10)},
+		"1001.3": {2: integer(10), 3: integer(thresholdLessOrEqual), 4: integer(-130)},
+		"1001.4": {2: integer(30), 3: integer(thresholdLessOrEqual), 4: integer(-170)},
+		"1002.1": {2: integer(30), 3: integer(thresholdGreaterThan), 4: integer(17)},
+	}
+
+	entitySensorReadings(sensorRows, true, physicalRows, aliasRows, thresholdRows, interfaces, readings)
 	applyOptics(interfaces, readings)
 
 	expectOptical(t, interfaces, 13, []float64{-4.5}, []float64{-2.1})
+	expectThresholds(t, interfaces, 13, &dashboard.OpticalThresholds{LowDBm: -17, HighDBm: 2}, nil)
 }
 
 func TestStandardSensorReadingsInWatts(t *testing.T) {
@@ -146,7 +185,7 @@ func TestStandardSensorReadingsInWatts(t *testing.T) {
 		t.Fatal("expected temperature sensors to be ignored")
 	}
 
-	entitySensorReadings(sensorRows, false, physicalRows, map[string]snmpRow{}, interfaces, readings)
+	entitySensorReadings(sensorRows, false, physicalRows, map[string]snmpRow{}, nil, interfaces, readings)
 	applyOptics(interfaces, readings)
 
 	// 1000 µW = 0 dBm, 500 nW = -33.01 dBm, 2000 µW = 3.01 dBm, 0 W = no light
@@ -162,6 +201,7 @@ func TestSensorsWithoutDirectionAreIgnored(t *testing.T) {
 		false,
 		map[string]snmpRow{"30": {4: integer(0), 5: integer(8), 7: octets("PSU 1 Power")}},
 		map[string]snmpRow{},
+		nil,
 		interfaces,
 		readings,
 	)
