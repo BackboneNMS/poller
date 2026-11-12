@@ -289,3 +289,7 @@ type submitResultsBody struct {
 type submitConfigResultsBody struct {
 	Results []ConfigResult `json:"results"`
 }
+
+type latestVersionResponse struct {
+	Version string `json:"version"`
+}

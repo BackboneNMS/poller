@@ -11,6 +11,12 @@ The open source polling agent for [Backbone NMS](https://backbonenms.net). Deplo
 3. Results are pushed back to the polling server in batches (`POST /api/poller/results`), several at a time and gzip compressed when the server supports it. Uploads run alongside polling, so a slow upload does not hold up polling.
 4. Devices whose configuration is due to be backed up come with a `configBackup` in the device list. The poller backs them up in the background, up to `config_backup.concurrency` at a time, by logging in over SSH or Telnet and running the platform's commands (see [Config backups](#config-backups)), and submits each configuration on its own (`POST /api/poller/configs`).
 
+At startup and every 6 hours, the poller asks the polling server for the latest poller release (`GET /api/poller/latest-version`, found from this repository's release tags) and logs a warning while it is older, saying whether the update is a `major`, `minor` or `patch` change:
+
+```json
+{"level":"WARN","msg":"A newer version of the poller is available","version":"1.1.0","latestVersion":"2.0.0","change":"major"}
+```
+
 Several polling server URLs can be configured. The poller keeps using the one that answered last and fails over to the others, in order, when it cannot be reached or responds with a server error. Resubmitting a batch to another server after a timeout is safe, as the servers ignore results they already stored.
 
 Only outbound HTTPS to the polling servers is required. Interface throughput is calculated on the poller from the difference in octet counters between polls, so the first poll after a restart reports counters without rates.
@@ -122,6 +128,8 @@ go vet ./...
 go test ./...
 make build
 ```
+
+Every change bumps `Version` in [src/main.go](src/main.go), following semantic versioning, and a release is made by pushing the matching `v` tag (`v1.2.3`), which publishes the Docker image and becomes the latest version pollers compare themselves against.
 
 The data sent to the polling server is defined in [src/api/defs.go](src/api/defs.go), which must stay in sync with the polling server's copy. SNMP collection from the standard MIBs lives in [src/snmp.go](src/snmp.go), with the shared SNMP primitives in [src/snmp](src/snmp), ENTITY-MIB (physical entities and the interfaces they belong to) in [src/entity](src/entity), transceiver diagnostics in [src/optics](src/optics) and the forwarding table in [src/fdb.go](src/fdb.go).
 
