@@ -29,6 +29,17 @@ const (
 	StorageTypeFlash         = "FLASH"
 	StorageTypeOther         = "OTHER"
 
+	InventoryClassChassis     = "CHASSIS"
+	InventoryClassBackplane   = "BACKPLANE"
+	InventoryClassContainer   = "CONTAINER"
+	InventoryClassPowerSupply = "POWER_SUPPLY"
+	InventoryClassFan         = "FAN"
+	InventoryClassModule      = "MODULE"
+	InventoryClassPort        = "PORT"
+	InventoryClassStack       = "STACK"
+	InventoryClassCPU         = "CPU"
+	InventoryClassOther       = "OTHER"
+
 	SNMPVersion1  = "1"
 	SNMPVersion2C = "2c"
 	SNMPVersion3  = "3"
@@ -125,20 +136,24 @@ type ConfigResult struct {
 // PollResult is the outcome of polling one device. Discovery is true for a full discovery. A status poll (false)
 // reports the system details, interface status and counters, and resources only: interfaces carry just their index,
 // name, speed, status and counters, and neighbors are empty, so the polling server merges it into the last discovery.
+// Inventory and ForwardingTable are nil when they were not collected (status polls, or a discovery that failed to read
+// them), which leaves the stored ones alone, and empty when the device has none.
 type PollResult struct {
-	DeviceID       string      `json:"deviceID"`
-	Discovery      bool        `json:"discovery"`
-	PolledAt       time.Time   `json:"polledAt"`
-	PollDurationMS int64       `json:"pollDurationMS"`
-	Online         bool        `json:"online"`
-	Reachable      bool        `json:"reachable"`
-	LatencyMS      *float64    `json:"latencyMS"`
-	CredentialID   *string     `json:"credentialID"`
-	Error          *string     `json:"error"`
-	System         *System     `json:"system"`
-	Interfaces     []Interface `json:"interfaces"`
-	Neighbors      []Neighbor  `json:"neighbors"`
-	Resources      *Resources  `json:"resources"`
+	DeviceID        string            `json:"deviceID"`
+	Discovery       bool              `json:"discovery"`
+	PolledAt        time.Time         `json:"polledAt"`
+	PollDurationMS  int64             `json:"pollDurationMS"`
+	Online          bool              `json:"online"`
+	Reachable       bool              `json:"reachable"`
+	LatencyMS       *float64          `json:"latencyMS"`
+	CredentialID    *string           `json:"credentialID"`
+	Error           *string           `json:"error"`
+	System          *System           `json:"system"`
+	Interfaces      []Interface       `json:"interfaces"`
+	Neighbors       []Neighbor        `json:"neighbors"`
+	Inventory       []InventoryItem   `json:"inventory"`
+	ForwardingTable []ForwardingEntry `json:"forwardingTable"`
+	Resources       *Resources        `json:"resources"`
 }
 
 type System struct {
@@ -157,36 +172,52 @@ type System struct {
 }
 
 type Interface struct {
-	Index              int        `json:"index"`
-	Name               string     `json:"name"`
-	Description        string     `json:"description"`
-	Alias              string     `json:"alias"`
-	Type               string     `json:"type"`
-	MTU                int        `json:"mtu"`
-	SpeedBitsPerSecond int64      `json:"speedBitsPerSecond"`
-	MACAddress         *string    `json:"macAddress"`
-	AdminStatus        string     `json:"adminStatus"`
-	OperStatus         string     `json:"operStatus"`
-	LastChangedAt      *time.Time `json:"lastChangedAt"`
-	Addresses          []string   `json:"addresses"`
-	InOctets           int64      `json:"inOctets"`
-	OutOctets          int64      `json:"outOctets"`
-	InDiscards         int64      `json:"inDiscards"`
-	OutDiscards        int64      `json:"outDiscards"`
-	InErrors           int64      `json:"inErrors"`
-	OutErrors          int64      `json:"outErrors"`
-	InBitsPerSecond    *int64     `json:"inBitsPerSecond"`
-	OutBitsPerSecond   *int64     `json:"outBitsPerSecond"`
-	Optical            *Optical   `json:"optical"`
+	Index              int          `json:"index"`
+	Name               string       `json:"name"`
+	Description        string       `json:"description"`
+	Alias              string       `json:"alias"`
+	Type               string       `json:"type"`
+	MTU                int          `json:"mtu"`
+	SpeedBitsPerSecond int64        `json:"speedBitsPerSecond"`
+	MACAddress         *string      `json:"macAddress"`
+	AdminStatus        string       `json:"adminStatus"`
+	OperStatus         string       `json:"operStatus"`
+	LastChangedAt      *time.Time   `json:"lastChangedAt"`
+	Addresses          []string     `json:"addresses"`
+	InOctets           int64        `json:"inOctets"`
+	OutOctets          int64        `json:"outOctets"`
+	InDiscards         int64        `json:"inDiscards"`
+	OutDiscards        int64        `json:"outDiscards"`
+	InErrors           int64        `json:"inErrors"`
+	OutErrors          int64        `json:"outErrors"`
+	InBitsPerSecond    *int64       `json:"inBitsPerSecond"`
+	OutBitsPerSecond   *int64       `json:"outBitsPerSecond"`
+	Optical            *Optical     `json:"optical"`
+	Transceiver        *Transceiver `json:"transceiver"`
 }
 
-// Optical holds the transceiver light levels of an interface, with one value per lane (a single value for most optics),
-// and the alarm thresholds the transceiver defines for them when it reports any.
+// Optical holds the diagnostics of an interface's transceiver: its light levels with one value per lane (a single
+// value for most optics), the alarm thresholds the transceiver defines for them when it reports any, and its
+// temperature, supply voltage and laser bias current (per lane) when the device reports them.
 type Optical struct {
-	RxPowerDBm   []float64          `json:"rxPowerDBm"`
-	TxPowerDBm   []float64          `json:"txPowerDBm"`
-	RxThresholds *OpticalThresholds `json:"rxThresholds"`
-	TxThresholds *OpticalThresholds `json:"txThresholds"`
+	RxPowerDBm         []float64          `json:"rxPowerDBm"`
+	TxPowerDBm         []float64          `json:"txPowerDBm"`
+	RxThresholds       *OpticalThresholds `json:"rxThresholds"`
+	TxThresholds       *OpticalThresholds `json:"txThresholds"`
+	TemperatureCelsius *float64           `json:"temperatureCelsius"`
+	VoltageVolts       *float64           `json:"voltageVolts"`
+	BiasCurrentMA      []float64          `json:"biasCurrentMA"`
+}
+
+// Transceiver identifies the transceiver plugged into an interface. Type is what kind it is as the device describes
+// it, such as a form factor ("SFP+") or a description ("SFP-10GBase-LR"); Model is the vendor's part number.
+type Transceiver struct {
+	Type            string   `json:"type"`
+	Manufacturer    string   `json:"manufacturer"`
+	Model           string   `json:"model"`
+	SerialNumber    string   `json:"serialNumber"`
+	HardwareVersion string   `json:"hardwareVersion"`
+	WavelengthNM    *float64 `json:"wavelengthNM"`
 }
 
 // OpticalThresholds are the low and high alarm thresholds of a light level, shared by every lane of the transceiver.
@@ -205,6 +236,32 @@ type Neighbor struct {
 	SystemName           string   `json:"systemName"`
 	SystemDescription    string   `json:"systemDescription"`
 	ManagementAddresses  []string `json:"managementAddresses"`
+}
+
+// InventoryItem is a physical part of a device from ENTITY-MIB: a chassis, module, port, transceiver, power supply or
+// fan. ParentIndex is the index of the item containing it (which may not be listed itself), and InterfaceIndex the
+// interface it belongs to, for ports and the transceivers in them.
+type InventoryItem struct {
+	Index           int    `json:"index"`
+	ParentIndex     *int   `json:"parentIndex"`
+	Class           string `json:"class"`
+	Name            string `json:"name"`
+	Description     string `json:"description"`
+	Manufacturer    string `json:"manufacturer"`
+	Model           string `json:"model"`
+	SerialNumber    string `json:"serialNumber"`
+	HardwareVersion string `json:"hardwareVersion"`
+	FirmwareVersion string `json:"firmwareVersion"`
+	SoftwareVersion string `json:"softwareVersion"`
+	InterfaceIndex  *int   `json:"interfaceIndex"`
+}
+
+// ForwardingEntry is a MAC address the device learned on one of its interfaces (its bridge forwarding database), in
+// a VLAN when the device reports which one
+type ForwardingEntry struct {
+	MACAddress     string `json:"macAddress"`
+	InterfaceIndex int    `json:"interfaceIndex"`
+	VLAN           *int   `json:"vlan"`
 }
 
 type Resources struct {

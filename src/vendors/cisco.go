@@ -3,7 +3,20 @@ package vendors
 import (
 	"main/src/cli"
 	"main/src/optics"
+	"main/src/snmp"
 	"regexp"
+	"slices"
+	"strconv"
+	"strings"
+
+	"github.com/gosnmp/gosnmp"
+)
+
+const (
+	oidCiscoVTPVLANEntry = "1.3.6.1.4.1.9.9.46.1.3.1.1" // CISCO-VTP-MIB vtpVlanEntry, indexed by VTP domain and VLAN
+
+	ciscoVLANStateOperational = 1
+	ciscoVLANTypeEthernet     = 1
 )
 
 // cisco reads light levels from CISCO-ENTITY-SENSOR-MIB, Cisco's variant of ENTITY-SENSOR-MIB, which reports dBm
@@ -19,7 +32,43 @@ var cisco = &Vendor{
 			ThresholdEntryOID:    "1.3.6.1.4.1.9.9.91.1.2.1.1",
 		},
 	},
+	ForwardingVLANs: ciscoForwardingVLANs,
 	ConfigPlatforms: []*ConfigPlatform{ciscoIOSXR, ciscoNXOS, ciscoIOS},
+}
+
+// ciscoForwardingVLANs lists the operational Ethernet VLANs from CISCO-VTP-MIB, whose forwarding tables Cisco serves
+// one VLAN at a time
+func ciscoForwardingVLANs(client *gosnmp.GoSNMP) ([]int, error) {
+	rows, err := snmp.WalkTable(client, oidCiscoVTPVLANEntry, 2, 3)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return ciscoVLANs(rows), nil
+}
+
+// ciscoVLANs reads the VLAN IDs out of vtpVlanTable rows (state in column 2, type in column 3), skipping suspended
+// VLANs and the FDDI and Token Ring defaults (1002 to 1005)
+func ciscoVLANs(rows map[string]snmp.Row) []int {
+	vlans := make([]int, 0, len(rows))
+
+	for index, row := range rows {
+		_, rawVLAN, ok := strings.Cut(index, ".")
+		vlan, err := strconv.Atoi(rawVLAN)
+
+		if !ok || err != nil || row.Int(2) != ciscoVLANStateOperational || row.Int(3) != ciscoVLANTypeEthernet {
+			continue
+		}
+
+		if !slices.Contains(vlans, vlan) {
+			vlans = append(vlans, vlan)
+		}
+	}
+
+	slices.Sort(vlans)
+
+	return vlans
 }
 
 // ciscoIOS covers IOS and IOS XE. The header lines and ntp clock-period (which IOS keeps adjusting) change without

@@ -7,7 +7,7 @@ The open source polling agent for [Backbone NMS](https://backbonenms.com). Deplo
 1. Every polling interval, the poller asks a polling server for the devices assigned to it (`GET /api/poller/devices`), authenticated with the access token you generated on the dashboard's **Pollers** page. The interval itself is an organization setting on the dashboard, so it can be changed without touching the poller.
 2. Each device is pinged (three echoes, for reachability and latency) and, unless it is ping-only, polled over SNMP v1, v2c or v3 with the credentials stored on the dashboard. A device can have several credentials to try (the organization's shared communities, for example): they are tried in the order the polling server sends them until one answers, and the poller reports which one worked so it is put first next time. Up to `snmp.concurrency` devices are polled at once. Devices that were down or unknown at their last poll (marked `priority` by the polling server) are started first so outages and recoveries show up sooner, and the rest take any free slots as soon as they open. Only the table columns the dashboard uses are requested, since some agents (Juniper EX switches especially) answer slowly per value, and a device that did not answer SNMP on its last poll is probed without retries.
 
-   Every device gets a **status poll** each cycle: the system details, interface status and traffic counters, and CPU, memory and storage. A **full discovery** also walks the tables that rarely change (IP addresses, LLDP neighbors, inventory and transceiver light levels). The polling server marks the devices due for discovery in the device list, and the poller discovers them in the background, up to `snmp.discovery_concurrency` at a time, with requested rediscoveries first, then devices never discovered, then the ones discovered longest ago. A device being discovered is left out of that cycle's status poll.
+   Every device gets a **status poll** each cycle: the system details, interface status and traffic counters, and CPU, memory and storage. A **full discovery** also walks the tables that change less often (IP addresses, LLDP neighbors, inventory, transceivers and the MAC address forwarding table). The polling server marks the devices due for discovery in the device list, and the poller discovers them in the background, up to `snmp.discovery_concurrency` at a time, with requested rediscoveries first, then devices never discovered, then the ones discovered longest ago. A device being discovered is left out of that cycle's status poll.
 3. Results are pushed back to the polling server in batches (`POST /api/poller/results`), several at a time and gzip compressed when the server supports it. Uploads run alongside polling, so a slow upload does not hold up polling.
 4. Devices whose configuration is due to be backed up come with a `configBackup` in the device list. The poller backs them up in the background, up to `config_backup.concurrency` at a time, by logging in over SSH or Telnet and running the platform's commands (see [Config backups](#config-backups)), and submits each configuration on its own (`POST /api/poller/configs`).
 
@@ -45,11 +45,18 @@ Lines that change on every read (build banners, byte counts, "last changed" time
 | IPv4 addresses per interface | IP-MIB `ipAddrTable` |
 | Manufacturer, model, serial number and firmware | ENTITY-MIB, plus vendor detection from `sysObjectID`; TIMETRA-CHASSIS-MIB (Nokia SR OS), ASAM-EQUIP-MIB and ASAM-SYSTEM-MIB (Nokia ISAM) |
 | CPU load, memory and storage usage | HOST-RESOURCES-MIB; TIMETRA-SYSTEM-MIB (Nokia SR OS) and ASAM-SYSTEM-MIB (Nokia ISAM) for CPU and memory |
+| Interface MAC addresses | IF-MIB `ifPhysAddress` |
 | Directly connected neighbors | LLDP-MIB |
+| Inventory (chassis, modules, ports, transceivers, power supplies, fans) and the interface each part belongs to | ENTITY-MIB `entPhysicalTable` and `entAliasMappingTable` |
+| MAC addresses learned on each interface, by VLAN | Q-BRIDGE-MIB `dot1qTpFdbTable`, otherwise BRIDGE-MIB `dot1dTpFdbTable` (per VLAN context on Cisco, from CISCO-VTP-MIB) |
 | Transceiver receive and transmit light levels, per lane | ENTITY-SENSOR-MIB, CISCO-ENTITY-SENSOR-MIB, JUNIPER-DOM-MIB, MIKROTIK-MIB, TIMETRA-PORT-MIB (Nokia SR OS) |
 | Transceiver low and high alarm thresholds for those light levels | CISCO-ENTITY-SENSOR-MIB, JUNIPER-DOM-MIB, TIMETRA-PORT-MIB (Nokia SR OS) |
+| Transceiver temperature, supply voltage and laser bias current | ENTITY-SENSOR-MIB, CISCO-ENTITY-SENSOR-MIB, JUNIPER-DOM-MIB, MIKROTIK-MIB |
+| Transceiver type, manufacturer, part number and serial number | ENTITY-MIB, MIKROTIK-MIB (also wavelength) |
 
 Nokia SR OS routers and switches (7750 SR, 7250 IXR, 7210 SAS and others) and ISAM access nodes and OLTs (7302, 7330, 7360 FX) implement neither HOST-RESOURCES-MIB nor, on SR OS, the standard hardware and sensor MIBs, so their own MIBs are read instead when the standard ones come back empty. Model and software version on SR OS come from the `TiMOS-...` system description.
+
+The forwarding table is read from the port column only, since walks cost time per value and the tables can hold thousands of addresses. Q-BRIDGE-MIB filtering databases are mapped to VLANs with `dot1qVlanFdbId`, or taken to be the VLAN ID when the device has no VLAN table. Cisco IOS serves BRIDGE-MIB one VLAN at a time, so each operational VLAN is read in its own context (`community@vlan` on SNMPv1 and v2c, context `vlan-N` on SNMPv3, which the SNMP group must be allowed to read). Addresses on the device's own ports (port 0) are left out. A discovery that fails to read the table leaves the previous one in place.
 
 ## Installation
 
@@ -102,7 +109,7 @@ go test ./...
 make build
 ```
 
-The data sent to the polling server is defined in [src/api/defs.go](src/api/defs.go), which must stay in sync with the polling server's copy. SNMP collection from the standard MIBs lives in [src/snmp.go](src/snmp.go), with the shared SNMP primitives in [src/snmp](src/snmp) and transceiver light levels in [src/optics](src/optics).
+The data sent to the polling server is defined in [src/api/defs.go](src/api/defs.go), which must stay in sync with the polling server's copy. SNMP collection from the standard MIBs lives in [src/snmp.go](src/snmp.go), with the shared SNMP primitives in [src/snmp](src/snmp), ENTITY-MIB (physical entities and the interfaces they belong to) in [src/entity](src/entity), transceiver diagnostics in [src/optics](src/optics) and the forwarding table in [src/fdb.go](src/fdb.go).
 
 ### Adding a vendor
 
@@ -113,8 +120,9 @@ Everything vendor-specific lives in [src/vendors](src/vendors), one file per ven
 | `Model` | Discoveries, when ENTITY-MIB has no model | Read the model out of the `sysDescr` |
 | `Hardware` | Discoveries | Serial number and versions from the vendor's own MIBs |
 | `Resources` | Every poll, when HOST-RESOURCES-MIB lacks CPU or memory | CPU load and memory from the vendor's own MIBs |
-| `Optics` | Discoveries | Light levels from the vendor's own tables, into `optics.Readings` keyed by ifIndex |
+| `Optics` | Discoveries | Transceiver light levels, other diagnostics and details from the vendor's own tables, into `optics.Readings` keyed by ifIndex |
 | `SensorTables` | Discoveries, when `Optics` finds nothing | Variants of ENTITY-SENSOR-MIB, described as `optics.SensorTable`s, tried before the standard one |
+| `ForwardingVLANs` | Discoveries, when Q-BRIDGE-MIB has no forwarding table | The VLANs whose BRIDGE-MIB forwarding tables are only served in a per-VLAN context |
 | `ConfigPlatforms` | Config backups | The command lines the vendor's configurations are backed up from, as `ConfigPlatform`s ([configplatform.go](src/vendors/configplatform.go)): a prompt pattern, the commands to run, a `sysDescr` pattern for detection and a `Clean` for lines that change on every read. Their IDs must match the dashboard's `ConfigPlatform` enum |
 
 Read tables with `snmp.WalkTable` (requesting only the columns used) and scalars with `snmp.GetRow`. To test a vendor against a simulated device, serve the values from a real device's `snmpwalk -On` with [snmptest](src/snmp/snmptest/agent.go): `snmptest.NewClient` returns a client to call the hooks with, as in [nokia_sros_test.go](src/vendors/nokia_sros_test.go). The SSH and Telnet session itself (logging in, `enable`, answering pagers) is in [src/cli](src/cli), tested against a simulated device in [fetch_test.go](src/cli/fetch_test.go).

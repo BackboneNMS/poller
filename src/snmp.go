@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"main/src/api"
+	"main/src/entity"
 	"main/src/snmp"
 	"main/src/vendors"
 	"net"
@@ -29,16 +30,12 @@ const (
 	oidInterfaceEntry            = "1.3.6.1.2.1.2.2.1"
 	oidInterfaceExtensionEntry   = "1.3.6.1.2.1.31.1.1.1"
 	oidIPAddressEntry            = "1.3.6.1.2.1.4.20.1"
-	oidPhysicalEntityEntry       = "1.3.6.1.2.1.47.1.1.1.1"
 	oidProcessorEntry            = "1.3.6.1.2.1.25.3.3.1"
 	oidStorageEntry              = "1.3.6.1.2.1.25.2.3.1"
 	oidStorageTypes              = "1.3.6.1.2.1.25.2.1"
 	oidLLDPLocalPortEntry        = "1.0.8802.1.1.2.1.3.7.1"
 	oidLLDPRemoteEntry           = "1.0.8802.1.1.2.1.4.1.1"
 	oidLLDPRemoteManagementEntry = "1.0.8802.1.1.2.1.4.2.1"
-
-	inventoryClassChassis = "CHASSIS"
-	inventoryClassOther   = "OTHER"
 )
 
 func NewSNMPClient(ctx context.Context, target string, port uint16, settings api.SNMPCredential) (*gosnmp.GoSNMP, error) {
@@ -156,30 +153,22 @@ func snmpPrivacyProtocol(name string) (gosnmp.SnmpV3PrivProtocol, error) {
 }
 
 type snmpData struct {
-	CredentialID *string
-	System       *api.System
-	Interfaces   []api.Interface
-	Neighbors    []api.Neighbor
-	Resources    *api.Resources
-}
-
-type inventoryItem struct {
-	Class           string
-	Manufacturer    string
-	Model           string
-	SerialNumber    string
-	HardwareVersion string
-	FirmwareVersion string
-	SoftwareVersion string
+	CredentialID    *string
+	System          *api.System
+	Interfaces      []api.Interface
+	Neighbors       []api.Neighbor
+	Inventory       []api.InventoryItem
+	ForwardingTable []api.ForwardingEntry
+	Resources       *api.Resources
 }
 
 // connectSNMP tries each of the device's credentials in order and returns a connected client for the first one the agent
-// answers, along with the system details it returned. Agents silently drop requests with an unknown community, so a wrong
+// answers, along with the system details it returned and the credential. Agents silently drop requests with an unknown community, so a wrong
 // credential costs one SNMP timeout before the next one is tried. Devices that did not answer on their last poll are
 // probed without retries, since most of them will not answer this time either and each retry costs another timeout.
-func connectSNMP(ctx context.Context, device api.Device, wasUnreachable bool) (*gosnmp.GoSNMP, *api.System, *string, error) {
+func connectSNMP(ctx context.Context, device api.Device, wasUnreachable bool) (*gosnmp.GoSNMP, *api.System, api.SNMPCredential, error) {
 	if len(device.SNMP.Credentials) < 1 {
-		return nil, nil, nil, errors.New("connectSNMP: no SNMP credentials are configured for this device")
+		return nil, nil, api.SNMPCredential{}, errors.New("connectSNMP: no SNMP credentials are configured for this device")
 	}
 
 	var lastErr error
@@ -208,30 +197,31 @@ func connectSNMP(ctx context.Context, device api.Device, wasUnreachable bool) (*
 		if err == nil {
 			client.Retries = conf.SNMP.Retries
 
-			return client, system, credential.ID, nil
+			return client, system, credential, nil
 		}
 
 		client.Conn.Close()
 
 		if ctx.Err() != nil {
-			return nil, nil, nil, ctx.Err()
+			return nil, nil, api.SNMPCredential{}, ctx.Err()
 		}
 
 		lastErr = err
 	}
 
 	if len(device.SNMP.Credentials) == 1 {
-		return nil, nil, nil, lastErr
+		return nil, nil, api.SNMPCredential{}, lastErr
 	}
 
-	return nil, nil, nil, fmt.Errorf("connectSNMP: none of the %d SNMP credentials received a response, last error: %w", len(device.SNMP.Credentials), lastErr)
+	return nil, nil, api.SNMPCredential{}, fmt.Errorf("connectSNMP: none of the %d SNMP credentials received a response, last error: %w", len(device.SNMP.Credentials), lastErr)
 }
 
 // CollectSNMPData polls a device over SNMP. A status poll (discover false) reads only what changes from poll to poll:
-// the system details, interface status and counters, and resources. A discovery also walks the tables that rarely
-// change (IP addresses, LLDP neighbors, inventory and transceiver optics), which is most of the work on large devices.
+// the system details, interface status and counters, and resources. A discovery also walks the tables that change
+// less often (IP addresses, LLDP neighbors, inventory, transceivers and the forwarding table), which is most of the
+// work on large devices.
 func CollectSNMPData(ctx context.Context, device api.Device, polledAt time.Time, wasUnreachable, discover bool) (*snmpData, error) {
-	client, system, credentialID, err := connectSNMP(ctx, device, wasUnreachable)
+	client, system, credential, err := connectSNMP(ctx, device, wasUnreachable)
 
 	if err != nil {
 		return nil, err
@@ -247,29 +237,42 @@ func CollectSNMPData(ctx context.Context, device api.Device, polledAt time.Time,
 		return nil, err
 	}
 
-	neighbors := make([]api.Neighbor, 0)
+	data := &snmpData{
+		CredentialID: credential.ID,
+		System:       system,
+		Interfaces:   interfaces,
+		Neighbors:    make([]api.Neighbor, 0),
+	}
 
 	if discover {
-		if neighbors, err = collectNeighbors(client, interfaces); err != nil {
+		if data.Neighbors, err = collectNeighbors(client, interfaces); err != nil {
 			return nil, err
 		}
 
-		physicalRows, err := snmp.WalkTable(client, oidPhysicalEntityEntry, 2, 4, 5, 7, 8, 9, 10, 11, 12, 13)
+		entities, err := entity.Walk(client)
 
 		if err != nil {
 			return nil, err
 		}
 
-		if err = collectOptics(client, vendor, physicalRows, interfaces); err != nil {
-			logger.Warn("Failed to collect transceiver light levels", "device", device.Name, "host", device.Host, "error", err)
+		if err = collectOptics(client, vendor, entities, interfaces); err != nil {
+			logger.Warn("Failed to collect transceiver diagnostics", "device", device.Name, "host", device.Host, "error", err)
 		}
 
-		applyHardwareDetails(system, collectInventory(physicalRows), vendor)
+		data.Inventory = collectInventory(entities, interfaces)
+
+		applyInventoryTransceivers(data.Inventory, entities, interfaces)
+		applyHardwareDetails(system, data.Inventory, vendor)
 
 		if vendor.Hardware != nil {
 			if err = vendor.Hardware(client, system); err != nil {
 				logger.Warn("Failed to collect vendor hardware details", "device", device.Name, "host", device.Host, "vendor", vendor.Name, "error", err)
 			}
+		}
+
+		// Left nil when it fails, so the polling server keeps the forwarding table from the last discovery
+		if data.ForwardingTable, err = collectForwardingTable(ctx, client, device, credential, vendor, interfaces); err != nil {
+			logger.Warn("Failed to collect forwarding table", "device", device.Name, "host", device.Host, "error", err)
 		}
 	}
 
@@ -285,13 +288,9 @@ func CollectSNMPData(ctx context.Context, device api.Device, polledAt time.Time,
 		}
 	}
 
-	return &snmpData{
-		CredentialID: credentialID,
-		System:       system,
-		Interfaces:   interfaces,
-		Neighbors:    neighbors,
-		Resources:    resources,
-	}, nil
+	data.Resources = resources
+
+	return data, nil
 }
 
 func collectSystem(client *gosnmp.GoSNMP) (*api.System, error) {
@@ -559,33 +558,41 @@ func collectLLDPManagementAddresses(client *gosnmp.GoSNMP) (map[string][]string,
 	return addresses, nil
 }
 
-func collectInventory(rows map[string]snmp.Row) []inventoryItem {
-	indexes := make([]int, 0, len(rows))
+// collectInventory lists the physical parts of a device: every entity except sensors that has a model or serial number
+// or belongs to an interface (ports and the transceivers in them)
+func collectInventory(entities *entity.Table, interfaces []api.Interface) []api.InventoryItem {
+	inventory := make([]api.InventoryItem, 0)
 
-	for index := range rows {
-		if entityIndex, err := strconv.Atoi(index); err == nil {
-			indexes = append(indexes, entityIndex)
-		}
-	}
+	for _, index := range snmp.SortedIndexes(entities.Rows) {
+		row := entities.Rows[index]
+		entityIndex, err := strconv.Atoi(index)
 
-	slices.Sort(indexes)
-
-	inventory := make([]inventoryItem, 0)
-
-	for _, entityIndex := range indexes {
-		row := rows[strconv.Itoa(entityIndex)]
-
-		item := inventoryItem{
-			Class:           inventoryClass(row.Int(5)),
-			Manufacturer:    row.String(12),
-			Model:           row.String(13),
-			SerialNumber:    row.String(11),
-			HardwareVersion: row.String(8),
-			FirmwareVersion: row.String(9),
-			SoftwareVersion: row.String(10),
+		if err != nil || row.Int(entity.ColumnClass) == entity.ClassSensor {
+			continue
 		}
 
-		if len(item.Model) < 1 && len(item.SerialNumber) < 1 {
+		item := api.InventoryItem{
+			Index:           entityIndex,
+			Class:           inventoryClass(row.Int(entity.ColumnClass)),
+			Name:            row.String(entity.ColumnName),
+			Description:     row.String(entity.ColumnDescription),
+			Manufacturer:    row.String(entity.ColumnManufacturer),
+			Model:           row.String(entity.ColumnModel),
+			SerialNumber:    row.String(entity.ColumnSerialNumber),
+			HardwareVersion: row.String(entity.ColumnHardwareVersion),
+			FirmwareVersion: row.String(entity.ColumnFirmwareVersion),
+			SoftwareVersion: row.String(entity.ColumnSoftwareVersion),
+		}
+
+		if parent := row.Int(entity.ColumnContainedIn); parent > 0 {
+			item.ParentIndex = PointerOf(int(parent))
+		}
+
+		if interfaceIndex, ok := entities.Interface(index, interfaces); ok {
+			item.InterfaceIndex = PointerOf(interfaceIndex)
+		}
+
+		if len(item.Model) < 1 && len(item.SerialNumber) < 1 && item.InterfaceIndex == nil {
 			continue
 		}
 
@@ -593,6 +600,45 @@ func collectInventory(rows map[string]snmp.Row) []inventoryItem {
 	}
 
 	return inventory
+}
+
+// applyInventoryTransceivers fills in the transceiver of interfaces the vendor's optics tables did not identify, from
+// the innermost inventory item belonging to the interface that has a model or serial number (the transceiver, rather
+// than the port holding it)
+func applyInventoryTransceivers(inventory []api.InventoryItem, entities *entity.Table, interfaces []api.Interface) {
+	innermost := make(map[int]api.InventoryItem)
+	depths := make(map[int]int)
+
+	for _, item := range inventory {
+		if item.InterfaceIndex == nil || item.Class == api.InventoryClassChassis || (len(item.Model) < 1 && len(item.SerialNumber) < 1) {
+			continue
+		}
+
+		depth := entities.Depth(strconv.Itoa(item.Index))
+
+		if current, ok := depths[*item.InterfaceIndex]; ok && current >= depth {
+			continue
+		}
+
+		innermost[*item.InterfaceIndex] = item
+		depths[*item.InterfaceIndex] = depth
+	}
+
+	for i := range interfaces {
+		item, ok := innermost[interfaces[i].Index]
+
+		if !ok || interfaces[i].Transceiver != nil {
+			continue
+		}
+
+		interfaces[i].Transceiver = &api.Transceiver{
+			Type:            item.Description,
+			Manufacturer:    item.Manufacturer,
+			Model:           item.Model,
+			SerialNumber:    item.SerialNumber,
+			HardwareVersion: item.HardwareVersion,
+		}
+	}
 }
 
 func collectResources(client *gosnmp.GoSNMP) (*api.Resources, error) {
@@ -662,9 +708,9 @@ func collectResources(client *gosnmp.GoSNMP) (*api.Resources, error) {
 	return resources, nil
 }
 
-func applyHardwareDetails(system *api.System, inventory []inventoryItem, vendor *vendors.Vendor) {
+func applyHardwareDetails(system *api.System, inventory []api.InventoryItem, vendor *vendors.Vendor) {
 	for _, item := range inventory {
-		if item.Class != inventoryClassChassis {
+		if item.Class != api.InventoryClassChassis || (len(item.Model) < 1 && len(item.SerialNumber) < 1) {
 			continue
 		}
 
@@ -826,12 +872,30 @@ func interfaceType(ianaType int) string {
 	}
 }
 
+// inventoryClass names an entPhysicalClass value
 func inventoryClass(value int64) string {
-	if value == 3 {
-		return inventoryClassChassis
+	switch value {
+	case entity.ClassChassis:
+		return api.InventoryClassChassis
+	case 4:
+		return api.InventoryClassBackplane
+	case 5:
+		return api.InventoryClassContainer
+	case 6:
+		return api.InventoryClassPowerSupply
+	case 7:
+		return api.InventoryClassFan
+	case entity.ClassModule:
+		return api.InventoryClassModule
+	case entity.ClassPort:
+		return api.InventoryClassPort
+	case 11:
+		return api.InventoryClassStack
+	case 12:
+		return api.InventoryClassCPU
+	default:
+		return api.InventoryClassOther
 	}
-
-	return inventoryClassOther
 }
 
 func storageType(oid string) string {

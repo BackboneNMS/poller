@@ -3,6 +3,7 @@ package vendors
 import (
 	"main/src/api"
 	"main/src/cli"
+	"main/src/entity"
 	"main/src/optics"
 	"main/src/snmp"
 	"regexp"
@@ -12,7 +13,24 @@ import (
 	"github.com/gosnmp/gosnmp"
 )
 
-const oidMikroTikOpticalEntry = "1.3.6.1.4.1.14988.1.1.19.1.1" // mtxrOpticalEntry
+const (
+	oidMikroTikOpticalEntry = "1.3.6.1.4.1.14988.1.1.19.1.1" // mtxrOpticalEntry
+
+	mikroTikModuleNotPresent = 0
+)
+
+// mikroTikTransceiverTypes names the SFF-8024 identifiers mtxrOpticalType reports
+var mikroTikTransceiverTypes = map[int64]string{
+	1:  "GBIC",
+	2:  "Soldered",
+	3:  "SFP",
+	11: "DWDM SFP",
+	12: "QSFP",
+	13: "QSFP+",
+	17: "QSFP28",
+	24: "QSFP-DD",
+	30: "QSFP (CMIS)",
+}
 
 var mikroTik = &Vendor{
 	Name:              "MikroTik",
@@ -51,7 +69,7 @@ func mikroTikModel(description string) string {
 }
 
 func mikroTikOptics(client *gosnmp.GoSNMP, interfaces []api.Interface) (optics.Readings, error) {
-	rows, err := snmp.WalkTable(client, oidMikroTikOpticalEntry, 2, 9, 10)
+	rows, err := snmp.WalkTable(client, oidMikroTikOpticalEntry, 2, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)
 
 	if err != nil {
 		return nil, err
@@ -60,8 +78,11 @@ func mikroTikOptics(client *gosnmp.GoSNMP, interfaces []api.Interface) (optics.R
 	return mikroTikReadings(rows, interfaces), nil
 }
 
-// mikroTikReadings reads MIKROTIK-MIB mtxrOpticalTable, which reports levels in thousandths of a dBm. Rows are
-// matched to interfaces by name, falling back to the row index as the interface index.
+// mikroTikReadings reads MIKROTIK-MIB mtxrOpticalTable, which reports levels in thousandths of a dBm, wavelength in
+// hundredths of a nanometer, temperature in degrees Celsius, supply voltage in millivolts and bias current in
+// milliamps, along with what transceiver is plugged in. Rows are matched to interfaces by name, falling back to the row
+// index as the interface index. Empty cages (mtxrOpticalModulePresent false, on RouterOS versions that report it) are
+// skipped.
 func mikroTikReadings(rows map[string]snmp.Row, interfaces []api.Interface) optics.Readings {
 	readings := make(optics.Readings)
 
@@ -72,8 +93,12 @@ func mikroTikReadings(rows map[string]snmp.Row, interfaces []api.Interface) opti
 			continue
 		}
 
-		if item := optics.FindInterfaceByName(interfaces, row.String(2)); item != nil {
+		if item := entity.FindInterfaceByName(interfaces, row.String(2)); item != nil {
 			interfaceIndex = item.Index
+		}
+
+		if present, ok := row.Number(13); ok && present == mikroTikModuleNotPresent {
+			continue
 		}
 
 		if value, ok := row.Number(10); ok {
@@ -83,6 +108,32 @@ func mikroTikReadings(rows map[string]snmp.Row, interfaces []api.Interface) opti
 		if value, ok := row.Number(9); ok {
 			readings.Add(interfaceIndex, 0, false, float64(value)/1000)
 		}
+
+		if value, ok := row.Number(8); ok {
+			readings.AddBiasCurrent(interfaceIndex, 0, float64(value))
+		}
+
+		if value, ok := row.Number(6); ok {
+			readings.SetTemperature(interfaceIndex, float64(value))
+		}
+
+		if value, ok := row.Number(7); ok {
+			readings.SetVoltage(interfaceIndex, float64(value)/1000)
+		}
+
+		details := api.Transceiver{
+			Type:         mikroTikTransceiverTypes[row.Int(15)],
+			Manufacturer: row.String(11),
+			Model:        row.String(14),
+			SerialNumber: row.String(12),
+		}
+
+		if value, ok := row.Number(5); ok && value > 0 {
+			wavelength := float64(value) / 100
+			details.WavelengthNM = &wavelength
+		}
+
+		readings.SetDetails(interfaceIndex, details)
 	}
 
 	return readings

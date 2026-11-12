@@ -29,11 +29,15 @@ type Vendor struct {
 	// Resources fills in the CPU load and memory HOST-RESOURCES-MIB did not provide, on every poll. It is only called
 	// when one of them is missing, and must leave values that are already set alone.
 	Resources func(client *gosnmp.GoSNMP, resources *api.Resources) error
-	// Optics reads transceiver light levels from the vendor's own tables, during discoveries. When it is not set or
-	// finds nothing, SensorTables and then the standard ENTITY-SENSOR-MIB are tried.
+	// Optics reads transceiver diagnostics and details from the vendor's own tables, during discoveries. When it is
+	// not set or finds nothing, SensorTables and then the standard ENTITY-SENSOR-MIB are tried.
 	Optics func(client *gosnmp.GoSNMP, interfaces []api.Interface) (optics.Readings, error)
-	// SensorTables are vendor variants of ENTITY-SENSOR-MIB to try for light levels before the standard one
+	// SensorTables are vendor variants of ENTITY-SENSOR-MIB to try for transceiver diagnostics before the standard one
 	SensorTables []optics.SensorTable
+	// ForwardingVLANs lists the VLANs whose forwarding tables (BRIDGE-MIB) can only be read in a context of their
+	// own, as on Cisco IOS ("community@vlan" on SNMPv1 and v2c, context "vlan-N" on v3). It is only called when the
+	// device has no Q-BRIDGE-MIB forwarding table.
+	ForwardingVLANs func(client *gosnmp.GoSNMP) ([]int, error)
 	// ConfigPlatforms are the command lines the family's configuration is backed up from, in the order they are
 	// tried when detecting a device's platform (see DetectConfigPlatform)
 	ConfigPlatforms []*ConfigPlatform

@@ -2,6 +2,7 @@ package optics
 
 import (
 	"main/src/api"
+	"main/src/entity"
 	"main/src/snmp"
 	"main/src/snmp/snmptest"
 	"slices"
@@ -78,12 +79,18 @@ func TestDBmSensorsWithMeasuredEntityAndThresholds(t *testing.T) {
 		"1001": {2: snmptest.OctetString("Te1/1/1 Receive Power Sensor"), 4: snmptest.Integer(1000), 5: snmptest.Integer(8)},
 		"1002": {2: snmptest.OctetString("Te1/1/1 Transmit Power Sensor"), 4: snmptest.Integer(1000), 5: snmptest.Integer(8)},
 		"1003": {2: snmptest.OctetString("Te1/1/1 Temperature Sensor"), 4: snmptest.Integer(1000), 5: snmptest.Integer(8)},
+		"1004": {2: snmptest.OctetString("Te1/1/1 Supply Voltage Sensor"), 4: snmptest.Integer(1000), 5: snmptest.Integer(8)},
+		"1005": {2: snmptest.OctetString("Te1/1/1 Bias Current Sensor"), 4: snmptest.Integer(1000), 5: snmptest.Integer(8)},
+		"2000": {2: snmptest.OctetString("Chassis Temperature Sensor"), 4: snmptest.Integer(1), 5: snmptest.Integer(8)},
 	}
 
 	sensorRows := map[string]snmp.Row{
 		"1001": {1: snmptest.Integer(14), 2: snmptest.Integer(9), 3: snmptest.Integer(1), 4: snmptest.Integer(-45), 5: snmptest.Integer(1), 8: snmptest.Integer(1000)},
 		"1002": {1: snmptest.Integer(14), 2: snmptest.Integer(9), 3: snmptest.Integer(1), 4: snmptest.Integer(-21), 5: snmptest.Integer(1), 8: snmptest.Integer(1000)},
 		"1003": {1: snmptest.Integer(8), 2: snmptest.Integer(9), 3: snmptest.Integer(1), 4: snmptest.Integer(312), 5: snmptest.Integer(1), 8: snmptest.Integer(1000)},
+		"1004": {1: snmptest.Integer(4), 2: snmptest.Integer(8), 3: snmptest.Integer(0), 4: snmptest.Integer(3291), 5: snmptest.Integer(1), 8: snmptest.Integer(1000)},
+		"1005": {1: snmptest.Integer(5), 2: snmptest.Integer(8), 3: snmptest.Integer(1), 4: snmptest.Integer(64), 5: snmptest.Integer(1), 8: snmptest.Integer(1000)},
+		"2000": {1: snmptest.Integer(8), 2: snmptest.Integer(9), 3: snmptest.Integer(0), 4: snmptest.Integer(45), 5: snmptest.Integer(1)},
 	}
 
 	aliasRows := map[string]snmp.Row{
@@ -102,11 +109,24 @@ func TestDBmSensorsWithMeasuredEntityAndThresholds(t *testing.T) {
 		"1002.1": {2: snmptest.Integer(30), 3: snmptest.Integer(thresholdGreaterThan), 4: snmptest.Integer(17)},
 	}
 
-	sensorReadings(ciscoStyle, sensorRows, physicalRows, aliasRows, thresholdRows, interfaces, readings)
+	sensorReadings(ciscoStyle, sensorRows, entity.NewTable(physicalRows, aliasRows), thresholdRows, interfaces, readings)
 	Apply(interfaces, readings)
 
 	expectOptical(t, interfaces, 13, []float64{-4.5}, []float64{-2.1})
 	expectThresholds(t, interfaces, 13, &api.OpticalThresholds{LowDBm: -17, HighDBm: 2}, nil)
+
+	// 3291 mV and 6.4 mA (milli scale), 31.2 °C; the chassis sensor belongs to no interface
+	optical := interfaces[3].Optical
+
+	if optical.TemperatureCelsius == nil || *optical.TemperatureCelsius != 31.2 || optical.VoltageVolts == nil || *optical.VoltageVolts != 3.291 || !slices.Equal(optical.BiasCurrentMA, []float64{6.4}) {
+		t.Fatalf("expected the transceiver's temperature, voltage and bias current, got %+v", optical)
+	}
+
+	for _, item := range interfaces {
+		if item.Index != 13 && item.Optical != nil {
+			t.Fatalf("expected only interface 13 to have diagnostics, got %+v on %d", item.Optical, item.Index)
+		}
+	}
 }
 
 func TestStandardSensorReadingsInWatts(t *testing.T) {
@@ -137,7 +157,7 @@ func TestStandardSensorReadingsInWatts(t *testing.T) {
 		t.Fatal("expected temperature sensors to be ignored")
 	}
 
-	sensorReadings(StandardSensors, sensorRows, physicalRows, map[string]snmp.Row{}, nil, interfaces, readings)
+	sensorReadings(StandardSensors, sensorRows, entity.NewTable(physicalRows, nil), nil, interfaces, readings)
 	Apply(interfaces, readings)
 
 	// 1000 µW = 0 dBm, 500 nW = -33.01 dBm, 2000 µW = 3.01 dBm, 0 W = no light
@@ -151,8 +171,7 @@ func TestSensorsWithoutDirectionAreIgnored(t *testing.T) {
 	sensorReadings(
 		StandardSensors,
 		map[string]snmp.Row{"30": {1: snmptest.Integer(sensorTypeWatts), 2: snmptest.Integer(9), 3: snmptest.Integer(0), 4: snmptest.Integer(150), 5: snmptest.Integer(1)}},
-		map[string]snmp.Row{"30": {4: snmptest.Integer(0), 5: snmptest.Integer(8), 7: snmptest.OctetString("PSU 1 Power")}},
-		map[string]snmp.Row{},
+		entity.NewTable(map[string]snmp.Row{"30": {4: snmptest.Integer(0), 5: snmptest.Integer(8), 7: snmptest.OctetString("PSU 1 Power")}}, nil),
 		nil,
 		interfaces,
 		readings,

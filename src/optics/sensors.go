@@ -2,6 +2,7 @@ package optics
 
 import (
 	"main/src/api"
+	"main/src/entity"
 	"main/src/snmp"
 	"math"
 	"regexp"
@@ -12,9 +13,6 @@ import (
 )
 
 const (
-	oidEntityAliasMappingEntry = "1.3.6.1.2.1.47.1.3.2.1"
-	oidInterfaceIndexColumn    = "1.3.6.1.2.1.2.2.1.1."
-
 	// Sensor table columns shared by ENTITY-SENSOR-MIB and the vendor variants laid out like it
 	sensorColumnType      = 1
 	sensorColumnScale     = 2
@@ -22,9 +20,12 @@ const (
 	sensorColumnValue     = 4
 	sensorColumnStatus    = 5
 
-	sensorTypeWatts = 6
-	sensorStatusOK  = 1
-	sensorScaleUnit = 9
+	sensorTypeVoltsDC = 4
+	sensorTypeAmperes = 5
+	sensorTypeWatts   = 6
+	sensorTypeCelsius = 8
+	sensorStatusOK    = 1
+	sensorScaleUnit   = 9
 
 	// Threshold table columns and relations, as in CISCO-ENTITY-SENSOR-MIB entSensorThresholdTable
 	thresholdColumnRelation = 3
@@ -33,8 +34,6 @@ const (
 	thresholdLessOrEqual    = 2
 	thresholdGreaterThan    = 3
 	thresholdGreaterOrEqual = 4
-
-	maxEntityDepth = 16
 )
 
 var (
@@ -76,13 +75,10 @@ func (t SensorTable) columns() []int {
 	return columns
 }
 
-// ReadSensors reads light levels from the first of tables with optical power sensors that match an interface. Sensors
-// are traced through the ENTITY-MIB hierarchy in physicalRows (entPhysicalTable columns 2, 4 and 7) back to an
-// interface.
-func ReadSensors(client *gosnmp.GoSNMP, tables []SensorTable, physicalRows map[string]snmp.Row, interfaces []api.Interface) (Readings, error) {
+// ReadSensors reads transceiver diagnostics from the first of tables with optical power sensors that match an
+// interface. Sensors are traced through the device's physical entities back to an interface.
+func ReadSensors(client *gosnmp.GoSNMP, tables []SensorTable, entities *entity.Table, interfaces []api.Interface) (Readings, error) {
 	readings := make(Readings)
-
-	var aliasRows map[string]snmp.Row
 
 	for _, table := range tables {
 		sensorRows, err := snmp.WalkTable(client, table.EntryOID, table.columns()...)
@@ -95,12 +91,6 @@ func ReadSensors(client *gosnmp.GoSNMP, tables []SensorTable, physicalRows map[s
 			continue
 		}
 
-		if aliasRows == nil {
-			if aliasRows, err = snmp.WalkTable(client, oidEntityAliasMappingEntry, 2); err != nil {
-				return readings, err
-			}
-		}
-
 		var thresholdRows map[string]snmp.Row
 
 		if len(table.ThresholdEntryOID) > 0 {
@@ -109,9 +99,9 @@ func ReadSensors(client *gosnmp.GoSNMP, tables []SensorTable, physicalRows map[s
 			}
 		}
 
-		sensorReadings(table, sensorRows, physicalRows, aliasRows, thresholdRows, interfaces, readings)
+		sensorReadings(table, sensorRows, entities, thresholdRows, interfaces, readings)
 
-		if len(readings) > 0 {
+		if readings.Count() > 0 {
 			break
 		}
 	}
@@ -147,7 +137,7 @@ func sensorDBm(table SensorTable, row snmp.Row) (float64, bool) {
 // sensorValueDBm converts a raw value of an optical power sensor, either its reading or one of its thresholds, to dBm
 // using the sensor's type, scale and precision
 func sensorValueDBm(table SensorTable, row snmp.Row, value int64) (float64, bool) {
-	magnitude := float64(value) * math.Pow(10, float64(3*(row.Int(sensorColumnScale)-sensorScaleUnit))) / math.Pow(10, float64(row.Int(sensorColumnPrecision)))
+	magnitude := sensorMagnitude(row, value)
 	sensorType := row.Int(sensorColumnType)
 
 	switch {
@@ -162,12 +152,18 @@ func sensorValueDBm(table SensorTable, row snmp.Row, value int64) (float64, bool
 	}
 }
 
+// sensorMagnitude converts a raw sensor value to its unit (watts, volts, amperes or degrees) using the sensor's scale
+// and precision
+func sensorMagnitude(row snmp.Row, value int64) float64 {
+	return float64(value) * math.Pow(10, float64(3*(row.Int(sensorColumnScale)-sensorScaleUnit))) / math.Pow(10, float64(row.Int(sensorColumnPrecision)))
+}
+
 // sensorReadings matches optical power sensors to interfaces. A sensor is optical when its type is power and its name
 // says whether it measures received or transmitted light. It belongs to the interface that the sensor (or the entity it
 // measures, or the closest entity containing it) is mapped to in entAliasMappingTable, or whose name matches the
-// entity's name.
-func sensorReadings(table SensorTable, sensorRows, physicalRows, aliasRows, thresholdRows map[string]snmp.Row, interfaces []api.Interface, readings Readings) {
-	entityInterfaces := aliasInterfaceIndexes(aliasRows)
+// entity's name. The temperature, voltage and current sensors of interfaces with light levels are then read as their
+// transceiver's temperature, supply voltage and laser bias current.
+func sensorReadings(table SensorTable, sensorRows map[string]snmp.Row, entities *entity.Table, thresholdRows map[string]snmp.Row, interfaces []api.Interface, readings Readings) {
 	sensorThresholds := groupSensorThresholds(thresholdRows)
 
 	for index, row := range sensorRows {
@@ -177,40 +173,82 @@ func sensorReadings(table SensorTable, sensorRows, physicalRows, aliasRows, thre
 			continue
 		}
 
-		entity := physicalRows[index]
-		label := entity.String(7) + " " + entity.String(2)
+		label := sensorLabel(entities, index)
 		receive := sensorReceivePattern.MatchString(label)
 
 		if !receive && !sensorTransmitPattern.MatchString(label) {
 			continue
 		}
 
-		start := index
-
-		if table.MeasuredEntityColumn > 0 {
-			if measured := row.Int(table.MeasuredEntityColumn); measured > 0 {
-				start = strconv.FormatInt(measured, 10)
-			}
-		}
-
-		interfaceIndex, ok := resolveEntityInterface(start, physicalRows, entityInterfaces, interfaces)
+		interfaceIndex, ok := sensorInterface(table, index, row, entities, interfaces)
 
 		if !ok {
 			continue
 		}
 
-		lane := 0
-
-		if match := sensorLanePattern.FindStringSubmatch(label); match != nil {
-			lane, _ = strconv.Atoi(match[1])
-		}
-
-		readings.Add(interfaceIndex, lane, receive, dBm)
+		readings.Add(interfaceIndex, sensorLane(label), receive, dBm)
 
 		if low, high, ok := sensorThresholdsDBm(table, row, sensorThresholds[index]); ok {
 			readings.SetThresholds(interfaceIndex, receive, low, high)
 		}
 	}
+
+	for index, row := range sensorRows {
+		sensorType := row.Int(sensorColumnType)
+		value, ok := row.Number(sensorColumnValue)
+
+		if !ok || row.Int(sensorColumnStatus) != sensorStatusOK || (sensorType != sensorTypeCelsius && sensorType != sensorTypeVoltsDC && sensorType != sensorTypeAmperes) {
+			continue
+		}
+
+		interfaceIndex, ok := sensorInterface(table, index, row, entities, interfaces)
+
+		if !ok || !readings.Has(interfaceIndex) {
+			continue
+		}
+
+		magnitude := sensorMagnitude(row, value)
+
+		switch sensorType {
+		case sensorTypeCelsius:
+			readings.SetTemperature(interfaceIndex, magnitude)
+		case sensorTypeVoltsDC:
+			readings.SetVoltage(interfaceIndex, magnitude)
+		case sensorTypeAmperes:
+			readings.AddBiasCurrent(interfaceIndex, sensorLane(sensorLabel(entities, index)), magnitude*1000)
+		}
+	}
+}
+
+// sensorLabel is what a sensor's entity is called, its name and description, which say what the sensor measures
+func sensorLabel(entities *entity.Table, index string) string {
+	row := entities.Rows[index]
+
+	return row.String(entity.ColumnName) + " " + row.String(entity.ColumnDescription)
+}
+
+// sensorLane is the lane a sensor's label names, or 0
+func sensorLane(label string) int {
+	if match := sensorLanePattern.FindStringSubmatch(label); match != nil {
+		lane, _ := strconv.Atoi(match[1])
+
+		return lane
+	}
+
+	return 0
+}
+
+// sensorInterface finds the interface a sensor belongs to, starting from the entity it measures when the table says
+func sensorInterface(table SensorTable, index string, row snmp.Row, entities *entity.Table, interfaces []api.Interface) (int, bool) {
+	start := index
+
+	if table.MeasuredEntityColumn > 0 {
+		if measured := row.Int(table.MeasuredEntityColumn); measured > 0 {
+			start = strconv.FormatInt(measured, 10)
+		}
+	}
+
+	return entities.Interface(start, interfaces)
 }
 
 // groupSensorThresholds groups the rows of a threshold table, indexed by sensor and then threshold, by the sensor they
@@ -253,41 +291,4 @@ func sensorThresholdsDBm(table SensorTable, row snmp.Row, thresholdRows []snmp.R
 	}
 
 	return low, high, !math.IsInf(low, 0) && !math.IsInf(high, 0)
-}
-
-// aliasInterfaceIndexes maps physical entities to interface indexes using entAliasMappingIdentifier, which points at
-// the ifIndex column of the interface table
-func aliasInterfaceIndexes(aliasRows map[string]snmp.Row) map[string]int {
-	result := make(map[string]int)
-
-	for index, row := range aliasRows {
-		entityIndex, _, _ := strings.Cut(index, ".")
-		rawInterface, ok := strings.CutPrefix(row.String(2), oidInterfaceIndexColumn)
-
-		if !ok {
-			continue
-		}
-
-		if interfaceIndex, err := strconv.Atoi(rawInterface); err == nil {
-			result[entityIndex] = interfaceIndex
-		}
-	}
-
-	return result
-}
-
-func resolveEntityInterface(entityIndex string, physicalRows map[string]snmp.Row, entityInterfaces map[string]int, interfaces []api.Interface) (int, bool) {
-	for depth := 0; depth < maxEntityDepth && entityIndex != "0" && len(entityIndex) > 0; depth++ {
-		if interfaceIndex, ok := entityInterfaces[entityIndex]; ok {
-			return interfaceIndex, true
-		}
-
-		if item := FindInterfaceByName(interfaces, physicalRows[entityIndex].String(7)); item != nil {
-			return item.Index, true
-		}
-
-		entityIndex = strconv.FormatInt(physicalRows[entityIndex].Int(4), 10)
-	}
-
-	return 0, false
 }

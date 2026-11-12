@@ -55,13 +55,13 @@ func juniperModel(description string) string {
 }
 
 func juniperOptics(client *gosnmp.GoSNMP, _ []api.Interface) (optics.Readings, error) {
-	laneRows, err := snmp.WalkTable(client, oidJuniperDOMLaneEntry, 6, 8)
+	laneRows, err := snmp.WalkTable(client, oidJuniperDOMLaneEntry, 6, 7, 8)
 
 	if err != nil {
 		return nil, err
 	}
 
-	rows, err := snmp.WalkTable(client, oidJuniperDOMEntry, 5, 7, 9, 10, 17, 18)
+	rows, err := snmp.WalkTable(client, oidJuniperDOMEntry, 5, 6, 7, 8, 9, 10, 17, 18, 25)
 
 	if err != nil {
 		return nil, err
@@ -70,9 +70,10 @@ func juniperOptics(client *gosnmp.GoSNMP, _ []api.Interface) (optics.Readings, e
 	return juniperReadings(rows, laneRows), nil
 }
 
-// juniperReadings reads JUNIPER-DOM-MIB, which reports levels in hundredths of a dBm. Multi-lane optics (QSFP) are
-// read per lane from the lane table, everything else from the per-interface table. Alarm thresholds only exist in the
-// per-interface table and apply to every lane.
+// juniperReadings reads JUNIPER-DOM-MIB, which reports levels in hundredths of a dBm, bias current in microamps,
+// temperature in degrees Celsius and supply voltage in millivolts. Multi-lane optics (QSFP) are read per lane from the
+// lane table, everything else from the per-interface table. Alarm thresholds, temperature and voltage only exist in
+// the per-interface table and apply to the whole module.
 func juniperReadings(rows, laneRows map[string]snmp.Row) optics.Readings {
 	readings := make(optics.Readings)
 
@@ -92,6 +93,10 @@ func juniperReadings(rows, laneRows map[string]snmp.Row) optics.Readings {
 		if value, ok := row.Number(8); ok {
 			readings.Add(interfaceIndex, lane, false, float64(value)/100)
 		}
+
+		if value, ok := row.Number(7); ok {
+			readings.AddBiasCurrent(interfaceIndex, lane, float64(value)/1000)
+		}
 	}
 
 	for index, row := range rows {
@@ -109,6 +114,18 @@ func juniperReadings(rows, laneRows map[string]snmp.Row) optics.Readings {
 			if value, ok := row.Number(7); ok {
 				readings.Add(interfaceIndex, 0, false, float64(value)/100)
 			}
+
+			if value, ok := row.Number(6); ok {
+				readings.AddBiasCurrent(interfaceIndex, 0, float64(value)/1000)
+			}
+		}
+
+		if value, ok := row.Number(8); ok {
+			readings.SetTemperature(interfaceIndex, float64(value))
+		}
+
+		if value, ok := row.Number(25); ok {
+			readings.SetVoltage(interfaceIndex, float64(value)/1000)
 		}
 
 		juniperThresholds(readings, interfaceIndex, true, row, 10, 9)
