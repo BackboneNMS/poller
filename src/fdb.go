@@ -56,7 +56,7 @@ func collectForwardingTable(ctx context.Context, client *gosnmp.GoSNMP, device a
 		}
 
 		if len(vlans) > 0 {
-			return collectVLANForwardingTables(ctx, device, credential, vlans, interfaces)
+			return collectVLANForwardingTables(ctx, device, credential, vendor, vlans, interfaces)
 		}
 	}
 
@@ -66,7 +66,7 @@ func collectForwardingTable(ctx context.Context, client *gosnmp.GoSNMP, device a
 // collectVLANForwardingTables reads the BRIDGE-MIB forwarding table of each VLAN in its own context. The first VLAN
 // that cannot be read fails the whole table, since it usually means the device does not allow VLAN contexts for these
 // credentials, and every remaining VLAN would cost another timeout.
-func collectVLANForwardingTables(ctx context.Context, device api.Device, credential api.SNMPCredential, vlans []int, interfaces []api.Interface) ([]api.ForwardingEntry, error) {
+func collectVLANForwardingTables(ctx context.Context, device api.Device, credential api.SNMPCredential, vendor *vendors.Vendor, vlans []int, interfaces []api.Interface) ([]api.ForwardingEntry, error) {
 	entries := make([]api.ForwardingEntry, 0)
 
 	for _, vlan := range vlans {
@@ -75,7 +75,7 @@ func collectVLANForwardingTables(ctx context.Context, device api.Device, credent
 		}
 
 		vlanEntries, err := func() ([]api.ForwardingEntry, error) {
-			client, err := vlanContextClient(ctx, device, credential, vlan)
+			client, err := vlanContextClient(ctx, device, credential, vendor, vlan)
 
 			if err != nil {
 				return nil, err
@@ -99,8 +99,8 @@ func collectVLANForwardingTables(ctx context.Context, device api.Device, credent
 }
 
 // vlanContextClient connects to the context holding one VLAN's bridge tables: "community@vlan" on SNMPv1 and v2c,
-// and context "vlan-N" on v3
-func vlanContextClient(ctx context.Context, device api.Device, credential api.SNMPCredential, vlan int) (*gosnmp.GoSNMP, error) {
+// and context "vlan-N" on v3, keeping to the vendor's request limits
+func vlanContextClient(ctx context.Context, device api.Device, credential api.SNMPCredential, vendor *vendors.Vendor, vlan int) (*gosnmp.GoSNMP, error) {
 	if credential.Version != api.SNMPVersion3 {
 		credential.Community += "@" + strconv.Itoa(vlan)
 	}
@@ -114,6 +114,8 @@ func vlanContextClient(ctx context.Context, device api.Device, credential api.SN
 	if credential.Version == api.SNMPVersion3 {
 		client.ContextName = "vlan-" + strconv.Itoa(vlan)
 	}
+
+	snmp.ApplyLimits(client, vendor.Limits())
 
 	if err = client.Connect(); err != nil {
 		return nil, err

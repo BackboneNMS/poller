@@ -41,6 +41,7 @@ func TestDetectConfigPlatform(t *testing.T) {
 		{"1.3.6.1.4.1.30065.1.3011.7048.427.3648", "Arista Networks EOS version 4.28.3M running on an Arista Networks DCS-7048T-A", "ARISTA_EOS"},
 		{"1.3.6.1.4.1.11.2.3.7.11.181.11", "Aruba JL261A 2930F-24G-PoE+-4SFP Switch, revision WC.16.10.0001, ROM WC.16.01.0008", "HPE_PROCURVE"},
 		{"1.3.6.1.4.1.8072.3.2.10", "EdgeOS v2.0.9-hotfix.7.5622731.230615.0857", "UBIQUITI_EDGEOS"},
+		{"1.3.6.1.4.1.11863.5.143", "JetStream 24-Port 10GE SFP+ L2+ Managed Switch", "TPLINK_JETSTREAM"},
 		{"1.3.6.1.4.1.8072.3.2.10", "Linux server 6.1.0", ""},
 		{"", "", ""},
 	} {
@@ -71,6 +72,7 @@ func TestConfigPlatformPrompts(t *testing.T) {
 		{nokiaSROSConfig, []string{"*A:pe1# ", "A:pe1#", "A:admin@pe1# ", "B:pe1>config>router# "}, []string{"[/]", "        exit"}},
 		{nokiaISAMConfig, []string{"typ:isadmin>#", "leg:isadmin># "}, []string{"configure system id isam-01"}},
 		{ubiquitiEdgeOS, []string{"ubnt@edge-01:~$ ", "vyos@vyos# "}, []string{"set interfaces ethernet eth0"}},
+		{tpLinkJetStream, []string{"SX3032F>", "SX3032F#", "SX3032F(config)#"}, []string{"Press any key to continue (Q to quit)", "#"}},
 	} {
 		for _, prompt := range test.prompts {
 			if !test.platform.Prompt.MatchString(prompt) {

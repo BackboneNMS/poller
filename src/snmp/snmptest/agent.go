@@ -8,15 +8,59 @@ import (
 	"net"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/gosnmp/gosnmp"
 )
 
-// NewAgent starts an agent on a random local UDP port that answers Get, GetNext and GetBulk requests from values (keyed
-// by OID without a leading dot) under any community, and stops it when the test ends. It returns the port.
-func NewAgent(t testing.TB, values map[string]gosnmp.SnmpPDU) uint16 {
+// Request is one request an agent received
+type Request struct {
+	Type           gosnmp.PDUType
+	OIDs           []string
+	MaxRepetitions uint32
+}
+
+// Agent is a running fake agent
+type Agent struct {
+	Port uint16
+
+	mu           sync.Mutex
+	requests     []Request
+	maxVariables int
+}
+
+// Requests returns the requests the agent has received, oldest first
+func (a *Agent) Requests() []Request {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	return slices.Clone(a.requests)
+}
+
+// SetMaxVariables makes the agent answer tooBig to requests whose response would hold more than max values, like an
+// agent whose responses must fit a small buffer. 0 removes the limit.
+func (a *Agent) SetMaxVariables(max int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.maxVariables = max
+}
+
+// record stores a request and returns the response size limit in force
+func (a *Agent) record(request Request) int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.requests = append(a.requests, request)
+
+	return a.maxVariables
+}
+
+// StartAgent starts an agent on a random local UDP port that answers Get, GetNext and GetBulk requests from values
+// (keyed by OID without a leading dot) under any community, and stops it when the test ends
+func StartAgent(t testing.TB, values map[string]gosnmp.SnmpPDU) *Agent {
 	t.Helper()
 
 	oids := make([]string, 0, len(values))
@@ -34,6 +78,8 @@ func NewAgent(t testing.TB, values map[string]gosnmp.SnmpPDU) uint16 {
 	}
 
 	t.Cleanup(func() { conn.Close() })
+
+	agent := &Agent{Port: uint16(conn.LocalAddr().(*net.UDPAddr).Port)}
 
 	get := func(oid string) gosnmp.SnmpPDU {
 		value, ok := values[oid]
@@ -80,6 +126,7 @@ func NewAgent(t testing.TB, values map[string]gosnmp.SnmpPDU) uint16 {
 				cursors[i] = strings.TrimPrefix(variable.Name, ".")
 			}
 
+			maxVariables := agent.record(Request{Type: request.PDUType, OIDs: slices.Clone(cursors), MaxRepetitions: request.MaxRepetitions})
 			variables := make([]gosnmp.SnmpPDU, 0, len(cursors))
 
 			switch request.PDUType {
@@ -102,8 +149,13 @@ func NewAgent(t testing.TB, values map[string]gosnmp.SnmpPDU) uint16 {
 			}
 
 			request.PDUType = gosnmp.GetResponse
-			request.Variables = variables
 			request.Error, request.ErrorIndex, request.NonRepeaters, request.MaxRepetitions = gosnmp.NoError, 0, 0, 0
+
+			if maxVariables > 0 && len(variables) > maxVariables {
+				request.Error = gosnmp.TooBig
+			} else {
+				request.Variables = variables
+			}
 
 			if response, err := request.MarshalMsg(); err == nil {
 				conn.WriteToUDP(response, address)
@@ -111,22 +163,23 @@ func NewAgent(t testing.TB, values map[string]gosnmp.SnmpPDU) uint16 {
 		}
 	}()
 
-	return uint16(conn.LocalAddr().(*net.UDPAddr).Port)
+	return agent
 }
 
-// NewClient starts an agent serving values and returns an SNMPv2c client connected to it
-func NewClient(t testing.TB, values map[string]gosnmp.SnmpPDU) *gosnmp.GoSNMP {
+// Client returns an SNMPv2c client connected to the agent, with the default request limits
+func (a *Agent) Client(t testing.TB) *gosnmp.GoSNMP {
 	t.Helper()
 
 	client := &gosnmp.GoSNMP{
 		Target:    "127.0.0.1",
-		Port:      NewAgent(t, values),
+		Port:      a.Port,
 		Transport: "udp",
 		Community: "public",
 		Version:   gosnmp.Version2c,
 		Timeout:   2 * time.Second,
-		MaxOids:   gosnmp.MaxOids,
 	}
+
+	snmp.ApplyLimits(client, snmp.DefaultLimits)
 
 	if err := client.Connect(); err != nil {
 		t.Fatal(err)
@@ -135,6 +188,13 @@ func NewClient(t testing.TB, values map[string]gosnmp.SnmpPDU) *gosnmp.GoSNMP {
 	t.Cleanup(func() { client.Conn.Close() })
 
 	return client
+}
+
+// NewClient starts an agent serving values and returns an SNMPv2c client connected to it
+func NewClient(t testing.TB, values map[string]gosnmp.SnmpPDU) *gosnmp.GoSNMP {
+	t.Helper()
+
+	return StartAgent(t, values).Client(t)
 }
 
 func Integer(value int) gosnmp.SnmpPDU {

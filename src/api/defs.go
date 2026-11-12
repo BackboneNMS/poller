@@ -264,11 +264,14 @@ type ForwardingEntry struct {
 	VLAN           *int   `json:"vlan"`
 }
 
+// Resources are a device's CPU load, memory and storage. MemoryUsedPercent is only set for devices that report memory
+// as a percentage without sizes (TP-Link); otherwise it is worked out from the sizes.
 type Resources struct {
-	CPULoadPercent   *float64  `json:"cpuLoadPercent"`
-	MemoryTotalBytes *int64    `json:"memoryTotalBytes"`
-	MemoryUsedBytes  *int64    `json:"memoryUsedBytes"`
-	Storage          []Storage `json:"storage"`
+	CPULoadPercent    *float64  `json:"cpuLoadPercent"`
+	MemoryTotalBytes  *int64    `json:"memoryTotalBytes"`
+	MemoryUsedBytes   *int64    `json:"memoryUsedBytes"`
+	MemoryUsedPercent *float64  `json:"memoryUsedPercent"`
+	Storage           []Storage `json:"storage"`
 }
 
 type Storage struct {

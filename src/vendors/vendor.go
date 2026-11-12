@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"main/src/api"
 	"main/src/optics"
+	"main/src/snmp"
 	"strings"
 
 	"github.com/gosnmp/gosnmp"
@@ -22,6 +23,9 @@ type Vendor struct {
 	Name string
 	// EnterpriseNumbers are the IANA private enterprise numbers (the N in 1.3.6.1.4.1.N) of the family's sysObjectIDs
 	EnterpriseNumbers []string
+	// SNMPLimits bound the requests sent to the family's agents, for agents that fail under the default ones. They
+	// apply from the first request after the system group, which identifies the vendor.
+	SNMPLimits *snmp.Limits
 	// Model reads the model out of the sysDescr, for devices whose ENTITY-MIB has none
 	Model func(description string) string
 	// Hardware fills in hardware details ENTITY-MIB did not provide (serial number, versions), during discoveries
@@ -43,6 +47,15 @@ type Vendor struct {
 	ConfigPlatforms []*ConfigPlatform
 }
 
+// Limits returns the bounds for requests to the family's agents
+func (v *Vendor) Limits() snmp.Limits {
+	if v.SNMPLimits != nil {
+		return *v.SNMPLimits
+	}
+
+	return snmp.DefaultLimits
+}
+
 // Unknown is returned for devices from enterprises without a vendor definition. It has no name or hooks, so only the
 // standard MIBs are read.
 var Unknown = &Vendor{}
@@ -61,6 +74,7 @@ var registry = []*Vendor{
 	nokia,
 	nokiaISAM,
 	nokiaSROS,
+	tpLink,
 	ubiquiti,
 }
 

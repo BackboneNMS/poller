@@ -5,6 +5,7 @@ import (
 	"main/src/api"
 	"main/src/snmp/snmptest"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,6 +15,15 @@ import (
 // collectFromAgent runs a discovery against a simulated device serving values on top of a system group and one
 // interface (ifIndex 35684352)
 func collectFromAgent(t *testing.T, objectID, description string, values map[string]gosnmp.SnmpPDU) *snmpData {
+	t.Helper()
+
+	data, _ := discoverFromAgent(t, objectID, description, values)
+
+	return data
+}
+
+// discoverFromAgent is collectFromAgent also returning the simulated device, which records the requests it received
+func discoverFromAgent(t *testing.T, objectID, description string, values map[string]gosnmp.SnmpPDU) (*snmpData, *snmptest.Agent) {
 	t.Helper()
 
 	values["1.3.6.1.2.1.1.1.0"] = snmptest.OctetString(description)
@@ -26,11 +36,13 @@ func collectFromAgent(t *testing.T, objectID, description string, values map[str
 	conf.SNMP.Timeout = 2 * time.Second
 	conf.SNMP.Retries = 0
 
+	agent := snmptest.StartAgent(t, values)
+
 	device := api.Device{
 		ID:   "device",
 		Name: "device",
 		Host: "127.0.0.1",
-		SNMP: api.DeviceSNMP{Port: snmptest.NewAgent(t, values), Credentials: []api.SNMPCredential{{Version: api.SNMPVersion2C, Community: "public"}}},
+		SNMP: api.DeviceSNMP{Port: agent.Port, Credentials: []api.SNMPCredential{{Version: api.SNMPVersion2C, Community: "public"}}},
 	}
 
 	data, err := CollectSNMPData(context.Background(), device, time.Now(), false, true)
@@ -39,7 +51,7 @@ func collectFromAgent(t *testing.T, objectID, description string, values map[str
 		t.Fatal(err)
 	}
 
-	return data
+	return data, agent
 }
 
 // TestCollectSNMPDataUsesVendorDefinitions checks every vendor hook is wired into a discovery, using Nokia SR OS, which
@@ -135,5 +147,76 @@ func TestCollectSNMPDataInventory(t *testing.T) {
 
 	if data.System.Model != "SW-48" || data.System.SerialNumber != "CHS123" {
 		t.Fatalf("expected the chassis hardware details, got %+v", data.System)
+	}
+}
+
+// TestCollectSNMPDataKeepsToVendorLimits checks a TP-Link discovery names one object per request after the system
+// group identified the vendor, and reads its definitions
+func TestCollectSNMPDataKeepsToVendorLimits(t *testing.T) {
+	data, agent := discoverFromAgent(t, "1.3.6.1.4.1.11863.5.143", "JetStream 24-Port 10GE SFP+ L2+ Managed Switch", map[string]gosnmp.SnmpPDU{
+		"1.3.6.1.2.1.2.2.1.8.35684352":      snmptest.Integer(1),
+		"1.3.6.1.4.1.11863.6.1.1.5.0":       snmptest.OctetString("SX3032F 1.0"),
+		"1.3.6.1.4.1.11863.6.4.1.2.1.1.2.1": snmptest.Integer(41),
+	})
+
+	if data.System.Manufacturer != "TP-Link" || data.System.Model != "SX3032F" {
+		t.Fatalf("expected the TP-Link definition, got %+v", data.System)
+	}
+
+	if data.Resources.MemoryUsedPercent == nil || *data.Resources.MemoryUsedPercent != 41 {
+		t.Fatalf("expected the memory percentage, got %+v", data.Resources)
+	}
+
+	requests := agent.Requests()
+
+	for _, request := range requests[1:] {
+		if len(request.OIDs) > 1 {
+			t.Fatalf("expected one object per request after the system group, got %+v", request)
+		}
+	}
+}
+
+// TestStatusPollReadsInterfaceFallbacksOnlyWhenNeeded checks ifTable's speed and 32-bit counters are only read for
+// interfaces without the ifXTable ones
+func TestStatusPollReadsInterfaceFallbacksOnlyWhenNeeded(t *testing.T) {
+	values := map[string]gosnmp.SnmpPDU{}
+
+	for _, index := range []string{"1", "2", "3", "4", "5"} {
+		values["1.3.6.1.2.1.2.2.1.8."+index] = snmptest.Integer(1)
+		values["1.3.6.1.2.1.2.2.1.5."+index] = snmptest.Gauge(100_000_000)
+		values["1.3.6.1.2.1.2.2.1.10."+index] = snmptest.Gauge(10)
+		values["1.3.6.1.2.1.2.2.1.16."+index] = snmptest.Gauge(20)
+		values["1.3.6.1.2.1.31.1.1.1.1."+index] = snmptest.OctetString("port " + index)
+	}
+
+	// Interfaces 1 to 4 have 64-bit counters and a high speed; interface 5 only has the ifTable values
+	for _, index := range []string{"1", "2", "3", "4"} {
+		values["1.3.6.1.2.1.31.1.1.1.6."+index] = gosnmp.SnmpPDU{Type: gosnmp.Counter64, Value: uint64(1000)}
+		values["1.3.6.1.2.1.31.1.1.1.10."+index] = gosnmp.SnmpPDU{Type: gosnmp.Counter64, Value: uint64(2000)}
+		values["1.3.6.1.2.1.31.1.1.1.15."+index] = snmptest.Gauge(10_000)
+	}
+
+	agent := snmptest.StartAgent(t, values)
+
+	interfaces, err := collectInterfaces(agent.Client(t), time.Now(), false)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(interfaces) != 5 || interfaces[0].InOctets != 1000 || interfaces[0].SpeedBitsPerSecond != 10_000_000_000 {
+		t.Fatalf("expected the ifXTable values, got %+v", interfaces)
+	}
+
+	if last := interfaces[4]; last.InOctets != 10 || last.OutOctets != 20 || last.SpeedBitsPerSecond != 100_000_000 {
+		t.Fatalf("expected the ifTable values for the interface without ifXTable ones, got %+v", last)
+	}
+
+	for _, request := range agent.Requests() {
+		for _, oid := range request.OIDs {
+			if request.Type != gosnmp.GetRequest && (strings.HasPrefix(oid, "1.3.6.1.2.1.2.2.1.5") || strings.HasPrefix(oid, "1.3.6.1.2.1.2.2.1.10") || strings.HasPrefix(oid, "1.3.6.1.2.1.2.2.1.16")) {
+				t.Fatalf("expected the fallback columns to be read with Get for one interface, not walked: %+v", request)
+			}
+		}
 	}
 }

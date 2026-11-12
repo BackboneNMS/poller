@@ -5,7 +5,7 @@ The open source polling agent for [Backbone NMS](https://backbonenms.com). Deplo
 ## How it works
 
 1. Every polling interval, the poller asks a polling server for the devices assigned to it (`GET /api/poller/devices`), authenticated with the access token you generated on the dashboard's **Pollers** page. The interval itself is an organization setting on the dashboard, so it can be changed without touching the poller.
-2. Each device is pinged (three echoes, for reachability and latency) and, unless it is ping-only, polled over SNMP v1, v2c or v3 with the credentials stored on the dashboard. A device can have several credentials to try (the organization's shared communities, for example): they are tried in the order the polling server sends them until one answers, and the poller reports which one worked so it is put first next time. Up to `snmp.concurrency` devices are polled at once. Devices that were down or unknown at their last poll (marked `priority` by the polling server) are started first so outages and recoveries show up sooner, and the rest take any free slots as soon as they open. Only the table columns the dashboard uses are requested, since some agents (Juniper EX switches especially) answer slowly per value, and a device that did not answer SNMP on its last poll is probed without retries.
+2. Each device is pinged (three echoes, for reachability and latency) and, unless it is ping-only, polled over SNMP v1, v2c or v3 with the credentials stored on the dashboard. A device can have several credentials to try (the organization's shared communities, for example): they are tried in the order the polling server sends them until one answers, and the poller reports which one worked so it is put first next time. Up to `snmp.concurrency` devices are polled at once. Devices that were down or unknown at their last poll (marked `priority` by the polling server) are started first so outages and recoveries show up sooner, and the rest take any free slots as soon as they open. Only the table columns the dashboard uses are requested, since some agents (Juniper EX switches especially) answer slowly per value, and a device that did not answer SNMP on its last poll is probed without retries. See [Request limits](#request-limits) for how the poller avoids overloading fragile agents.
 
    Every device gets a **status poll** each cycle: the system details, interface status and traffic counters, and CPU, memory and storage. A **full discovery** also walks the tables that change less often (IP addresses, LLDP neighbors, inventory, transceivers and the MAC address forwarding table). The polling server marks the devices due for discovery in the device list, and the poller discovers them in the background, up to `snmp.discovery_concurrency` at a time, with requested rediscoveries first, then devices never discovered, then the ones discovered longest ago. A device being discovered is left out of that cycle's status poll.
 3. Results are pushed back to the polling server in batches (`POST /api/poller/results`), several at a time and gzip compressed when the server supports it. Uploads run alongside polling, so a slow upload does not hold up polling.
@@ -33,8 +33,22 @@ The platform decides which commands turn off paging and print the configuration.
 | Nokia ISAM | `environment inhibit-alarms mode batch`, `info configure flat` |
 | HPE ProCurve / ArubaOS-Switch | `enable` if needed, `no page`, `show running-config` |
 | Ubiquiti EdgeOS / VyOS | `terminal length 0`, `show configuration commands \| cat` |
+| TP-Link JetStream / Omada switch | `enable` if needed, `show running-config`, answering its "Press any key to continue" pager |
 
 Lines that change on every read (build banners, byte counts, "last changed" timestamps, NTP clock-period) are removed so the polling server only stores a new revision when something really changed. Over SSH, the host key fingerprint is recorded at the first backup and the device must present it from then on: a different key fails the backup before any credentials are sent. Older key exchanges and ciphers are offered after the modern ones, since a lot of network equipment supports nothing newer. The platforms have been tested against simulated devices, not real hardware.
+
+### Request limits
+
+The SNMP agents of many switches compute each value on request, reading interface counters from the switching chip or searching the whole forwarding table for every lookup, and some freeze or reboot when one request asks for too much. TP-Link JetStream and Omada switches are known to. So the poller:
+
+- names at most 10 objects in one request and asks for at most 25 rows per GetBulk (about 50 values in all), splitting larger reads into several requests;
+- starts every table walk with a single row and doubles that with each answer, so a table the device does not have costs one tiny request rather than one the agent fills with whatever follows the table;
+- asks for half as many rows when an agent answers `tooBig`;
+- reads ifTable's 32-bit counters and speed only for interfaces without the 64-bit ones in ifXTable, which saves three columns per interface on most devices.
+
+Vendors with fragile agents get stricter limits from the system group onwards. TP-Link devices are read one object per request, 10 rows at a time, with at least 20 ms between requests, the way net-snmp's `snmpbulkwalk` reads them, and their transceiver tables are read without GetBulk, as LibreNMS does.
+
+When a discovery stops getting answers part way, the polling server holds back automatic rediscoveries of that device for an hour, doubling with each failure in a row up to the organization's rediscovery interval, so a device that crashed is not crashed again as soon as it comes back. Rediscoveries requested on the dashboard still run straight away.
 
 ### What is collected
 
@@ -43,18 +57,18 @@ Lines that change on every read (build banners, byte counts, "last changed" time
 | Name, description, contact, location, uptime | SNMPv2-MIB `system` |
 | Interfaces with status, speed, counters, errors and throughput | IF-MIB `ifTable` / `ifXTable` |
 | IPv4 addresses per interface | IP-MIB `ipAddrTable` |
-| Manufacturer, model, serial number and firmware | ENTITY-MIB, plus vendor detection from `sysObjectID`; TIMETRA-CHASSIS-MIB (Nokia SR OS), ASAM-EQUIP-MIB and ASAM-SYSTEM-MIB (Nokia ISAM) |
-| CPU load, memory and storage usage | HOST-RESOURCES-MIB; TIMETRA-SYSTEM-MIB (Nokia SR OS) and ASAM-SYSTEM-MIB (Nokia ISAM) for CPU and memory |
+| Manufacturer, model, serial number and firmware | ENTITY-MIB, plus vendor detection from `sysObjectID`; TIMETRA-CHASSIS-MIB (Nokia SR OS), ASAM-EQUIP-MIB and ASAM-SYSTEM-MIB (Nokia ISAM), TPLINK-SYSINFO-MIB (TP-Link) |
+| CPU load, memory and storage usage | HOST-RESOURCES-MIB; TIMETRA-SYSTEM-MIB (Nokia SR OS), ASAM-SYSTEM-MIB (Nokia ISAM) and TPLINK-SYSMONITOR-MIB (TP-Link, memory as a percentage only) for CPU and memory |
 | Interface MAC addresses | IF-MIB `ifPhysAddress` |
 | Directly connected neighbors | LLDP-MIB |
 | Inventory (chassis, modules, ports, transceivers, power supplies, fans) and the interface each part belongs to | ENTITY-MIB `entPhysicalTable` and `entAliasMappingTable` |
 | MAC addresses learned on each interface, by VLAN | Q-BRIDGE-MIB `dot1qTpFdbTable`, otherwise BRIDGE-MIB `dot1dTpFdbTable` (per VLAN context on Cisco, from CISCO-VTP-MIB) |
-| Transceiver receive and transmit light levels, per lane | ENTITY-SENSOR-MIB, CISCO-ENTITY-SENSOR-MIB, JUNIPER-DOM-MIB, MIKROTIK-MIB, TIMETRA-PORT-MIB (Nokia SR OS) |
-| Transceiver low and high alarm thresholds for those light levels | CISCO-ENTITY-SENSOR-MIB, JUNIPER-DOM-MIB, TIMETRA-PORT-MIB (Nokia SR OS) |
-| Transceiver temperature, supply voltage and laser bias current | ENTITY-SENSOR-MIB, CISCO-ENTITY-SENSOR-MIB, JUNIPER-DOM-MIB, MIKROTIK-MIB |
+| Transceiver receive and transmit light levels, per lane | ENTITY-SENSOR-MIB, CISCO-ENTITY-SENSOR-MIB, JUNIPER-DOM-MIB, MIKROTIK-MIB, TIMETRA-PORT-MIB (Nokia SR OS), TPLINK-DDMSTATUS-MIB (TP-Link) |
+| Transceiver low and high alarm thresholds for those light levels | CISCO-ENTITY-SENSOR-MIB, JUNIPER-DOM-MIB, TIMETRA-PORT-MIB (Nokia SR OS), TPLINK-DDMRXPOWTHRESHOLD-MIB and TPLINK-DDMTXPOWTHRESHOLD-MIB (TP-Link) |
+| Transceiver temperature, supply voltage and laser bias current | ENTITY-SENSOR-MIB, CISCO-ENTITY-SENSOR-MIB, JUNIPER-DOM-MIB, MIKROTIK-MIB, TPLINK-DDMSTATUS-MIB (TP-Link) |
 | Transceiver type, manufacturer, part number and serial number | ENTITY-MIB, MIKROTIK-MIB (also wavelength) |
 
-Nokia SR OS routers and switches (7750 SR, 7250 IXR, 7210 SAS and others) and ISAM access nodes and OLTs (7302, 7330, 7360 FX) implement neither HOST-RESOURCES-MIB nor, on SR OS, the standard hardware and sensor MIBs, so their own MIBs are read instead when the standard ones come back empty. Model and software version on SR OS come from the `TiMOS-...` system description.
+Nokia SR OS routers and switches (7750 SR, 7250 IXR, 7210 SAS and others) and ISAM access nodes and OLTs (7302, 7330, 7360 FX) implement neither HOST-RESOURCES-MIB nor, on SR OS, the standard hardware and sensor MIBs, so their own MIBs are read instead when the standard ones come back empty. Model and software version on SR OS come from the `TiMOS-...` system description. TP-Link switches report their model as part of the hardware version (`SX3032F 1.0`), and their transceiver readings as text, with optical power in milliwatts. TP-Link support has been tested against a simulated device built from the TPLINK-* MIBs, not real hardware.
 
 The forwarding table is read from the port column only, since walks cost time per value and the tables can hold thousands of addresses. Q-BRIDGE-MIB filtering databases are mapped to VLANs with `dot1qVlanFdbId`, or taken to be the VLAN ID when the device has no VLAN table. Cisco IOS serves BRIDGE-MIB one VLAN at a time, so each operational VLAN is read in its own context (`community@vlan` on SNMPv1 and v2c, context `vlan-N` on SNMPv3, which the SNMP group must be allowed to read). Addresses on the device's own ports (port 0) are left out. A discovery that fails to read the table leaves the previous one in place.
 

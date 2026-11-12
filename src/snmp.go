@@ -46,8 +46,9 @@ func NewSNMPClient(ctx context.Context, target string, port uint16, settings api
 		Transport: "udp",
 		Timeout:   conf.SNMP.Timeout,
 		Retries:   conf.SNMP.Retries,
-		MaxOids:   gosnmp.MaxOids,
 	}
+
+	snmp.ApplyLimits(client, snmp.DefaultLimits)
 
 	switch settings.Version {
 	case api.SNMPVersion1:
@@ -231,6 +232,8 @@ func CollectSNMPData(ctx context.Context, device api.Device, polledAt time.Time,
 
 	vendor := vendors.Identify(system.ObjectID)
 
+	snmp.ApplyLimits(client, vendor.Limits())
+
 	interfaces, err := collectInterfaces(client, polledAt.Add(-time.Duration(system.UptimeSeconds)*time.Second), discover)
 
 	if err != nil {
@@ -333,14 +336,21 @@ func collectSystem(client *gosnmp.GoSNMP) (*api.System, error) {
 	return system, nil
 }
 
-// collectInterfaces reads the interface tables. A status poll reads only the speed, status and counter columns (ifTable)
-// and the name and 64-bit counters (ifXTable); a discovery also reads the description, type, MTU, MAC address, alias and
-// IP addresses, which the polling server keeps from the last discovery in between.
+// collectInterfaces reads the interface tables. A status poll reads the name, speed and 64-bit counters (ifXTable) and
+// the status, last change, discard and error columns (ifTable); a discovery also reads the description, type, MTU, MAC
+// address, alias and IP addresses, which the polling server keeps from the last discovery in between. The 32-bit
+// counters and speed in ifTable are only read for the interfaces that lack the ifXTable ones.
 func collectInterfaces(client *gosnmp.GoSNMP, bootedAt time.Time, discover bool) ([]api.Interface, error) {
-	columns, extensionColumns := []int{5, 7, 8, 9, 10, 13, 14, 16, 19, 20}, []int{1, 6, 10, 15}
+	columns, extensionColumns := []int{7, 8, 9, 13, 14, 19, 20}, []int{1, 6, 10, 15}
 
 	if discover {
-		columns, extensionColumns = append(columns, 2, 3, 4, 6), append(extensionColumns, 18)
+		columns, extensionColumns = append([]int{2, 3, 4, 6}, columns...), append(extensionColumns, 18)
+	}
+
+	extensionRows, err := snmp.WalkTable(client, oidInterfaceExtensionEntry, extensionColumns...)
+
+	if err != nil {
+		return nil, err
 	}
 
 	rows, err := snmp.WalkTable(client, oidInterfaceEntry, columns...)
@@ -349,9 +359,7 @@ func collectInterfaces(client *gosnmp.GoSNMP, bootedAt time.Time, discover bool)
 		return nil, err
 	}
 
-	extensionRows, err := snmp.WalkTable(client, oidInterfaceExtensionEntry, extensionColumns...)
-
-	if err != nil {
+	if err = snmp.FillColumns(client, oidInterfaceEntry, rows, interfaceFallbacks(rows, extensionRows)); err != nil {
 		return nil, err
 	}
 
@@ -412,6 +420,31 @@ func collectInterfaces(client *gosnmp.GoSNMP, bootedAt time.Time, discover bool)
 	})
 
 	return interfaces, nil
+}
+
+// interfaceFallbacks lists the interfaces that need ifTable's speed (ifSpeed) or 32-bit counters (ifInOctets,
+// ifOutOctets) because ifXTable has no usable value for them: no ifHighSpeed, or 0 for interfaces slower than 1 Mbit/s,
+// and no 64-bit counters
+func interfaceFallbacks(rows, extensionRows map[string]snmp.Row) map[int][]string {
+	needs := make(map[int][]string)
+
+	for index := range rows {
+		extensionRow := extensionRows[index]
+
+		if extensionRow.Int(15) <= 0 {
+			needs[5] = append(needs[5], index)
+		}
+
+		if _, ok := extensionRow.Number(6); !ok {
+			needs[10] = append(needs[10], index)
+		}
+
+		if _, ok := extensionRow.Number(10); !ok {
+			needs[16] = append(needs[16], index)
+		}
+	}
+
+	return needs
 }
 
 func collectIPAddresses(client *gosnmp.GoSNMP) (map[int][]string, error) {
