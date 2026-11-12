@@ -1,6 +1,6 @@
 polling_server:
   urls:
-    - https://poll.backbonenms.com
+    - https://poll.backbonenms.net
   token: ''
   timeout: 30s
 snmp:
