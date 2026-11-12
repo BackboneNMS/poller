@@ -1,7 +1,8 @@
-package main
+package snmp
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -17,12 +18,12 @@ type columnCursor struct {
 	last   string
 }
 
-// walkTable reads the given columns of an SNMP table into rows keyed by their index. Only the columns that are used are
+// WalkTable reads the given columns of an SNMP table into rows keyed by their index. Only the columns that are used are
 // requested, because some agents answer slowly per value (Juniper EX switches take minutes to walk every column of the
 // interface tables). The columns are walked side by side: one row per request on SNMPv1, and several rows per request
 // with GetBulk on v2c and v3.
-func walkTable(client *gosnmp.GoSNMP, entryOID string, columns ...int) (map[string]snmpRow, error) {
-	rows := make(map[string]snmpRow)
+func WalkTable(client *gosnmp.GoSNMP, entryOID string, columns ...int) (map[string]Row, error) {
+	rows := make(map[string]Row)
 	active := make([]*columnCursor, 0, len(columns))
 
 	for _, column := range columns {
@@ -67,7 +68,7 @@ func walkTable(client *gosnmp.GoSNMP, entryOID string, columns ...int) (map[stri
 		}
 
 		if packet.Error != gosnmp.NoError {
-			return rows, fmt.Errorf("walkTable: agent responded with error %s", packet.Error)
+			return rows, fmt.Errorf("WalkTable: agent responded with error %s", packet.Error)
 		}
 
 		if len(packet.Variables) < 1 {
@@ -89,14 +90,14 @@ func walkTable(client *gosnmp.GoSNMP, entryOID string, columns ...int) (map[stri
 			name := strings.TrimPrefix(pdu.Name, ".")
 			index, ok := strings.CutPrefix(name, cursor.prefix)
 
-			if !ok || pdu.Type == gosnmp.EndOfMibView || pdu.Type == gosnmp.NoSuchObject || pdu.Type == gosnmp.NoSuchInstance || compareOIDs(name, cursor.last) <= 0 {
+			if !ok || pdu.Type == gosnmp.EndOfMibView || pdu.Type == gosnmp.NoSuchObject || pdu.Type == gosnmp.NoSuchInstance || CompareOIDs(name, cursor.last) <= 0 {
 				finished[position] = true
 
 				continue
 			}
 
 			if rows[index] == nil {
-				rows[index] = make(snmpRow)
+				rows[index] = make(Row)
 			}
 
 			rows[index][cursor.column] = pdu
@@ -117,8 +118,8 @@ func walkTable(client *gosnmp.GoSNMP, entryOID string, columns ...int) (map[stri
 	return rows, nil
 }
 
-// compareOIDs orders two dotted OIDs numerically, the order agents return them in
-func compareOIDs(a, b string) int {
+// CompareOIDs orders two dotted OIDs numerically, the order agents return them in
+func CompareOIDs(a, b string) int {
 	aParts, bParts := strings.Split(a, "."), strings.Split(b, ".")
 
 	for i := range min(len(aParts), len(bParts)) {
@@ -135,4 +136,17 @@ func compareOIDs(a, b string) int {
 	}
 
 	return len(aParts) - len(bParts)
+}
+
+// SortedIndexes returns the indexes of table rows in the order the agent returns them
+func SortedIndexes(rows map[string]Row) []string {
+	indexes := make([]string, 0, len(rows))
+
+	for index := range rows {
+		indexes = append(indexes, index)
+	}
+
+	slices.SortFunc(indexes, CompareOIDs)
+
+	return indexes
 }

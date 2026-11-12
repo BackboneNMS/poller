@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"main/src/api"
+	"main/src/snmp"
+	"main/src/vendors"
 	"net"
 	"slices"
 	"strconv"
@@ -18,7 +20,6 @@ import (
 )
 
 const (
-	oidEnterprises               = "1.3.6.1.4.1"
 	oidSystemDescription         = "1.3.6.1.2.1.1.1.0"
 	oidSystemObjectID            = "1.3.6.1.2.1.1.2.0"
 	oidSystemUptime              = "1.3.6.1.2.1.1.3.0"
@@ -39,8 +40,6 @@ const (
 	inventoryClassChassis = "CHASSIS"
 	inventoryClassOther   = "OTHER"
 )
-
-type snmpRow map[int]gosnmp.SnmpPDU
 
 func NewSNMPClient(ctx context.Context, target string, port uint16, settings api.SNMPCredential) (*gosnmp.GoSNMP, error) {
 	client := &gosnmp.GoSNMP{
@@ -240,7 +239,7 @@ func CollectSNMPData(ctx context.Context, device api.Device, polledAt time.Time,
 
 	defer client.Conn.Close()
 
-	enterpriseNumber := objectIDEnterpriseNumber(system.ObjectID)
+	vendor := vendors.Identify(system.ObjectID)
 
 	interfaces, err := collectInterfaces(client, polledAt.Add(-time.Duration(system.UptimeSeconds)*time.Second), discover)
 
@@ -255,21 +254,21 @@ func CollectSNMPData(ctx context.Context, device api.Device, polledAt time.Time,
 			return nil, err
 		}
 
-		physicalRows, err := walkTable(client, oidPhysicalEntityEntry, 2, 4, 5, 7, 8, 9, 10, 11, 12, 13)
+		physicalRows, err := snmp.WalkTable(client, oidPhysicalEntityEntry, 2, 4, 5, 7, 8, 9, 10, 11, 12, 13)
 
 		if err != nil {
 			return nil, err
 		}
 
-		if err = collectOptics(client, enterpriseNumber, physicalRows, interfaces); err != nil {
+		if err = collectOptics(client, vendor, physicalRows, interfaces); err != nil {
 			logger.Warn("Failed to collect transceiver light levels", "device", device.Name, "host", device.Host, "error", err)
 		}
 
-		applyHardwareDetails(system, collectInventory(physicalRows))
+		applyHardwareDetails(system, collectInventory(physicalRows), vendor)
 
-		if isNokia(enterpriseNumber) {
-			if err = collectNokiaHardware(client, enterpriseNumber, system); err != nil {
-				logger.Warn("Failed to collect Nokia hardware details", "device", device.Name, "host", device.Host, "error", err)
+		if vendor.Hardware != nil {
+			if err = vendor.Hardware(client, system); err != nil {
+				logger.Warn("Failed to collect vendor hardware details", "device", device.Name, "host", device.Host, "vendor", vendor.Name, "error", err)
 			}
 		}
 	}
@@ -280,9 +279,9 @@ func CollectSNMPData(ctx context.Context, device api.Device, polledAt time.Time,
 		return nil, err
 	}
 
-	if isNokia(enterpriseNumber) && (resources.CPULoadPercent == nil || resources.MemoryTotalBytes == nil) {
-		if err = collectNokiaResources(client, enterpriseNumber, resources); err != nil {
-			logger.Warn("Failed to collect Nokia CPU and memory", "device", device.Name, "host", device.Host, "error", err)
+	if vendor.Resources != nil && (resources.CPULoadPercent == nil || resources.MemoryTotalBytes == nil) {
+		if err = vendor.Resources(client, resources); err != nil {
+			logger.Warn("Failed to collect vendor CPU and memory", "device", device.Name, "host", device.Host, "vendor", vendor.Name, "error", err)
 		}
 	}
 
@@ -318,17 +317,17 @@ func collectSystem(client *gosnmp.GoSNMP) (*api.System, error) {
 	for _, pdu := range packet.Variables {
 		switch strings.TrimPrefix(pdu.Name, ".") {
 		case oidSystemDescription:
-			system.Description = pduString(pdu)
+			system.Description = snmp.PDUString(pdu)
 		case oidSystemObjectID:
-			system.ObjectID = pduString(pdu)
+			system.ObjectID = snmp.PDUString(pdu)
 		case oidSystemUptime:
-			system.UptimeSeconds = pduInt(pdu) / 100
+			system.UptimeSeconds = snmp.PDUInt(pdu) / 100
 		case oidSystemContact:
-			system.Contact = pduString(pdu)
+			system.Contact = snmp.PDUString(pdu)
 		case oidSystemName:
-			system.Name = pduString(pdu)
+			system.Name = snmp.PDUString(pdu)
 		case oidSystemLocation:
-			system.Location = pduString(pdu)
+			system.Location = snmp.PDUString(pdu)
 		}
 	}
 
@@ -345,13 +344,13 @@ func collectInterfaces(client *gosnmp.GoSNMP, bootedAt time.Time, discover bool)
 		columns, extensionColumns = append(columns, 2, 3, 4, 6), append(extensionColumns, 18)
 	}
 
-	rows, err := walkTable(client, oidInterfaceEntry, columns...)
+	rows, err := snmp.WalkTable(client, oidInterfaceEntry, columns...)
 
 	if err != nil {
 		return nil, err
 	}
 
-	extensionRows, err := walkTable(client, oidInterfaceExtensionEntry, extensionColumns...)
+	extensionRows, err := snmp.WalkTable(client, oidInterfaceExtensionEntry, extensionColumns...)
 
 	if err != nil {
 		return nil, err
@@ -375,27 +374,27 @@ func collectInterfaces(client *gosnmp.GoSNMP, bootedAt time.Time, discover bool)
 		}
 
 		extensionRow := extensionRows[index]
-		ianaType := int(rowInt(row, 3))
+		ianaType := int(row.Int(3))
 
 		item := api.Interface{
 			Index:              interfaceIndex,
-			Name:               rowString(extensionRow, 1),
-			Description:        rowString(row, 2),
-			Alias:              rowString(extensionRow, 18),
+			Name:               extensionRow.String(1),
+			Description:        row.String(2),
+			Alias:              extensionRow.String(18),
 			Type:               interfaceType(ianaType),
-			MTU:                int(rowInt(row, 4)),
+			MTU:                int(row.Int(4)),
 			SpeedBitsPerSecond: interfaceSpeed(row, extensionRow),
-			MACAddress:         formatMACAddress(rowBytes(row, 6)),
-			AdminStatus:        interfaceStatus(rowInt(row, 7)),
-			OperStatus:         interfaceStatus(rowInt(row, 8)),
-			LastChangedAt:      interfaceLastChangedAt(bootedAt, rowInt(row, 9)),
+			MACAddress:         formatMACAddress(row.Bytes(6)),
+			AdminStatus:        interfaceStatus(row.Int(7)),
+			OperStatus:         interfaceStatus(row.Int(8)),
+			LastChangedAt:      interfaceLastChangedAt(bootedAt, row.Int(9)),
 			Addresses:          addresses[interfaceIndex],
 			InOctets:           rowCounter(extensionRow, 6, row, 10),
 			OutOctets:          rowCounter(extensionRow, 10, row, 16),
-			InDiscards:         rowInt(row, 13),
-			OutDiscards:        rowInt(row, 19),
-			InErrors:           rowInt(row, 14),
-			OutErrors:          rowInt(row, 20),
+			InDiscards:         row.Int(13),
+			OutDiscards:        row.Int(19),
+			InErrors:           row.Int(14),
+			OutErrors:          row.Int(20),
 		}
 
 		if len(item.Name) < 1 {
@@ -417,7 +416,7 @@ func collectInterfaces(client *gosnmp.GoSNMP, bootedAt time.Time, discover bool)
 }
 
 func collectIPAddresses(client *gosnmp.GoSNMP) (map[int][]string, error) {
-	rows, err := walkTable(client, oidIPAddressEntry, 2, 3)
+	rows, err := snmp.WalkTable(client, oidIPAddressEntry, 2, 3)
 
 	if err != nil {
 		return nil, err
@@ -427,14 +426,14 @@ func collectIPAddresses(client *gosnmp.GoSNMP) (map[int][]string, error) {
 
 	for index, row := range rows {
 		ipAddress := net.ParseIP(index).To4()
-		mask := net.ParseIP(rowString(row, 3)).To4()
+		mask := net.ParseIP(row.String(3)).To4()
 
 		if ipAddress == nil || mask == nil {
 			continue
 		}
 
 		prefixLength, _ := net.IPMask(mask).Size()
-		interfaceIndex := int(rowInt(row, 2))
+		interfaceIndex := int(row.Int(2))
 
 		addresses[interfaceIndex] = append(addresses[interfaceIndex], fmt.Sprintf("%s/%d", ipAddress, prefixLength))
 	}
@@ -447,13 +446,13 @@ func collectIPAddresses(client *gosnmp.GoSNMP) (map[int][]string, error) {
 }
 
 func collectNeighbors(client *gosnmp.GoSNMP, interfaces []api.Interface) ([]api.Neighbor, error) {
-	localPorts, err := walkTable(client, oidLLDPLocalPortEntry, 2, 3, 4)
+	localPorts, err := snmp.WalkTable(client, oidLLDPLocalPortEntry, 2, 3, 4)
 
 	if err != nil {
 		return nil, err
 	}
 
-	rows, err := walkTable(client, oidLLDPRemoteEntry, 4, 5, 6, 7, 8, 9, 10)
+	rows, err := snmp.WalkTable(client, oidLLDPRemoteEntry, 4, 5, 6, 7, 8, 9, 10)
 
 	if err != nil {
 		return nil, err
@@ -477,13 +476,13 @@ func collectNeighbors(client *gosnmp.GoSNMP, interfaces []api.Interface) ([]api.
 		localPort := localPorts[parts[1]]
 
 		item := api.Neighbor{
-			LocalPortID:          lldpIdentifier(rowInt(localPort, 2), rowBytes(localPort, 3), 3, 4),
-			LocalPortDescription: rowString(localPort, 4),
-			ChassisID:            lldpIdentifier(rowInt(row, 4), rowBytes(row, 5), 4, 5),
-			PortID:               lldpIdentifier(rowInt(row, 6), rowBytes(row, 7), 3, 4),
-			PortDescription:      rowString(row, 8),
-			SystemName:           rowString(row, 9),
-			SystemDescription:    rowString(row, 10),
+			LocalPortID:          lldpIdentifier(localPort.Int(2), localPort.Bytes(3), 3, 4),
+			LocalPortDescription: localPort.String(4),
+			ChassisID:            lldpIdentifier(row.Int(4), row.Bytes(5), 4, 5),
+			PortID:               lldpIdentifier(row.Int(6), row.Bytes(7), 3, 4),
+			PortDescription:      row.String(8),
+			SystemName:           row.String(9),
+			SystemDescription:    row.String(10),
 			ManagementAddresses:  managementAddresses[index],
 		}
 
@@ -508,7 +507,7 @@ func collectNeighbors(client *gosnmp.GoSNMP, interfaces []api.Interface) ([]api.
 }
 
 func collectLLDPManagementAddresses(client *gosnmp.GoSNMP) (map[string][]string, error) {
-	rows, err := walkTable(client, oidLLDPRemoteManagementEntry, 3, 4, 5)
+	rows, err := snmp.WalkTable(client, oidLLDPRemoteManagementEntry, 3, 4, 5)
 
 	if err != nil {
 		return nil, err
@@ -560,7 +559,7 @@ func collectLLDPManagementAddresses(client *gosnmp.GoSNMP) (map[string][]string,
 	return addresses, nil
 }
 
-func collectInventory(rows map[string]snmpRow) []inventoryItem {
+func collectInventory(rows map[string]snmp.Row) []inventoryItem {
 	indexes := make([]int, 0, len(rows))
 
 	for index := range rows {
@@ -577,13 +576,13 @@ func collectInventory(rows map[string]snmpRow) []inventoryItem {
 		row := rows[strconv.Itoa(entityIndex)]
 
 		item := inventoryItem{
-			Class:           inventoryClass(rowInt(row, 5)),
-			Manufacturer:    rowString(row, 12),
-			Model:           rowString(row, 13),
-			SerialNumber:    rowString(row, 11),
-			HardwareVersion: rowString(row, 8),
-			FirmwareVersion: rowString(row, 9),
-			SoftwareVersion: rowString(row, 10),
+			Class:           inventoryClass(row.Int(5)),
+			Manufacturer:    row.String(12),
+			Model:           row.String(13),
+			SerialNumber:    row.String(11),
+			HardwareVersion: row.String(8),
+			FirmwareVersion: row.String(9),
+			SoftwareVersion: row.String(10),
 		}
 
 		if len(item.Model) < 1 && len(item.SerialNumber) < 1 {
@@ -597,13 +596,13 @@ func collectInventory(rows map[string]snmpRow) []inventoryItem {
 }
 
 func collectResources(client *gosnmp.GoSNMP) (*api.Resources, error) {
-	processors, err := walkTable(client, oidProcessorEntry, 2)
+	processors, err := snmp.WalkTable(client, oidProcessorEntry, 2)
 
 	if err != nil {
 		return nil, err
 	}
 
-	rows, err := walkTable(client, oidStorageEntry, 2, 3, 4, 5, 6)
+	rows, err := snmp.WalkTable(client, oidStorageEntry, 2, 3, 4, 5, 6)
 
 	if err != nil {
 		return nil, err
@@ -619,7 +618,7 @@ func collectResources(client *gosnmp.GoSNMP) (*api.Resources, error) {
 	)
 
 	for _, row := range processors {
-		if load, ok := rowNumber(row, 2); ok {
+		if load, ok := row.Number(2); ok {
 			processorCount++
 			processorTotal += load
 		}
@@ -636,14 +635,14 @@ func collectResources(client *gosnmp.GoSNMP) (*api.Resources, error) {
 			continue
 		}
 
-		allocationUnits := rowInt(row, 4)
+		allocationUnits := row.Int(4)
 
 		resources.Storage = append(resources.Storage, api.Storage{
 			Index:       storageIndex,
-			Type:        storageType(rowString(row, 2)),
-			Description: rowString(row, 3),
-			SizeBytes:   rowInt(row, 5) * allocationUnits,
-			UsedBytes:   rowInt(row, 6) * allocationUnits,
+			Type:        storageType(row.String(2)),
+			Description: row.String(3),
+			SizeBytes:   row.Int(5) * allocationUnits,
+			UsedBytes:   row.Int(6) * allocationUnits,
 		})
 	}
 
@@ -663,7 +662,7 @@ func collectResources(client *gosnmp.GoSNMP) (*api.Resources, error) {
 	return resources, nil
 }
 
-func applyHardwareDetails(system *api.System, inventory []inventoryItem) {
+func applyHardwareDetails(system *api.System, inventory []inventoryItem, vendor *vendors.Vendor) {
 	for _, item := range inventory {
 		if item.Class != inventoryClassChassis {
 			continue
@@ -679,145 +678,21 @@ func applyHardwareDetails(system *api.System, inventory []inventoryItem) {
 		break
 	}
 
-	enterpriseNumber := objectIDEnterpriseNumber(system.ObjectID)
-
-	if manufacturer := enterpriseManufacturer(enterpriseNumber); len(manufacturer) > 0 {
-		system.Manufacturer = manufacturer
+	if len(vendor.Name) > 0 {
+		system.Manufacturer = vendor.Name
 	}
 
-	if len(system.Model) < 1 {
-		system.Model = descriptionModel(enterpriseNumber, system.Description)
+	if len(system.Model) < 1 && vendor.Model != nil {
+		system.Model = vendor.Model(system.Description)
 	}
 }
 
-func objectIDEnterpriseNumber(objectID string) string {
-	suffix, ok := strings.CutPrefix(objectID, oidEnterprises+".")
-
-	if !ok {
-		return ""
-	}
-
-	number, _, _ := strings.Cut(suffix, ".")
-
-	return number
-}
-
-func enterpriseManufacturer(enterpriseNumber string) string {
-	switch enterpriseNumber {
-	case "9":
-		return "Cisco"
-	case "11", "232":
-		return "Hewlett Packard"
-	case "161", "17713":
-		return "Cambium"
-	case "2509":
-		return "Aviat"
-	case "2636":
-		return "Juniper"
-	case "3808":
-		return "CyberPower"
-	case "14988":
-		return "MikroTik"
-	case "94", enterpriseNokiaISAM, enterpriseNokiaSROS:
-		return "Nokia"
-	case "41112":
-		return "Ubiquiti"
-	case "46242":
-		return "Netonix"
-	case "52642":
-		return "FiberStore"
-	default:
-		return ""
-	}
-}
-
-func descriptionModel(enterpriseNumber, description string) string {
-	fields := strings.Fields(description)
-
-	switch {
-	case enterpriseNumber == "14988" && len(fields) > 1 && fields[0] == "RouterOS":
-		return fields[1]
-	case enterpriseNumber == "46242" && len(fields) > 1 && fields[0] == "Netonix":
-		return fields[1]
-	case enterpriseNumber == "2636" && len(fields) > 3 && strings.HasPrefix(description, "Juniper Networks, Inc. "):
-		return strings.ToUpper(fields[3])
-	case enterpriseNumber == enterpriseNokiaSROS:
-		_, model := nokiaDescription(description)
-
-		return model
-	default:
-		return ""
-	}
-}
-
-func rowString(row snmpRow, column int) string {
-	pdu, ok := row[column]
-
-	if !ok {
-		return ""
-	}
-
-	return pduString(pdu)
-}
-
-func rowBytes(row snmpRow, column int) []byte {
-	pdu, ok := row[column]
-
-	if !ok || pdu.Type != gosnmp.OctetString {
-		return nil
-	}
-
-	value, _ := pdu.Value.([]byte)
-
-	return value
-}
-
-func rowInt(row snmpRow, column int) int64 {
-	value, _ := rowNumber(row, column)
-
-	return value
-}
-
-func rowNumber(row snmpRow, column int) (int64, bool) {
-	pdu, ok := row[column]
-
-	if !ok {
-		return 0, false
-	}
-
-	switch pdu.Type {
-	case gosnmp.Integer, gosnmp.Counter32, gosnmp.Gauge32, gosnmp.TimeTicks, gosnmp.Counter64, gosnmp.Uinteger32:
-		return pduInt(pdu), true
-	default:
-		return 0, false
-	}
-}
-
-func rowCounter(row snmpRow, column int, fallbackRow snmpRow, fallbackColumn int) int64 {
-	if value, ok := rowNumber(row, column); ok {
+func rowCounter(row snmp.Row, column int, fallbackRow snmp.Row, fallbackColumn int) int64 {
+	if value, ok := row.Number(column); ok {
 		return value
 	}
 
-	return rowInt(fallbackRow, fallbackColumn)
-}
-
-func pduString(pdu gosnmp.SnmpPDU) string {
-	switch pdu.Type {
-	case gosnmp.OctetString:
-		value, _ := pdu.Value.([]byte)
-
-		return strings.TrimSpace(strings.ToValidUTF8(strings.TrimRight(string(value), "\x00"), ""))
-	case gosnmp.ObjectIdentifier, gosnmp.IPAddress:
-		value, _ := pdu.Value.(string)
-
-		return strings.TrimPrefix(value, ".")
-	default:
-		return ""
-	}
-}
-
-func pduInt(pdu gosnmp.SnmpPDU) int64 {
-	return gosnmp.ToBigInt(pdu.Value).Int64()
+	return fallbackRow.Int(fallbackColumn)
 }
 
 func formatMACAddress(value []byte) *string {
@@ -891,12 +766,12 @@ func lldpInterfaceIndex(localPortNumber, localPortID, localPortDescription strin
 	return nil
 }
 
-func interfaceSpeed(row, extensionRow snmpRow) int64 {
-	if highSpeed := rowInt(extensionRow, 15); highSpeed > 0 {
+func interfaceSpeed(row, extensionRow snmp.Row) int64 {
+	if highSpeed := extensionRow.Int(15); highSpeed > 0 {
 		return highSpeed * 1_000_000
 	}
 
-	return rowInt(row, 5)
+	return row.Int(5)
 }
 
 func interfaceLastChangedAt(bootedAt time.Time, ticks int64) *time.Time {

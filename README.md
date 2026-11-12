@@ -74,10 +74,25 @@ Logs are written to stdout as JSON.
 
 ```sh
 go vet ./...
+go test ./...
 make build
 ```
 
-The data sent to the polling server is defined in [src/api/defs.go](src/api/defs.go), which must stay in sync with the polling server's copy,, and SNMP collection lives in [src/snmp.go](src/snmp.go).
+The data sent to the polling server is defined in [src/api/defs.go](src/api/defs.go), which must stay in sync with the polling server's copy. SNMP collection from the standard MIBs lives in [src/snmp.go](src/snmp.go), with the shared SNMP primitives in [src/snmp](src/snmp) and transceiver light levels in [src/optics](src/optics).
+
+### Adding a vendor
+
+Everything vendor-specific lives in [src/vendors](src/vendors), one file per vendor, each defining a `Vendor` ([vendor.go](src/vendors/vendor.go)) and listed in `registry` there. A device's vendor is identified by the enterprise number in its `sysObjectID`, and each enterprise number can belong to only one vendor. Only `Name` and `EnterpriseNumbers` are required; the rest are optional hooks, which only fill in what the standard MIBs did not:
+
+| Field | Called | Use |
+| --- | --- | --- |
+| `Model` | Discoveries, when ENTITY-MIB has no model | Read the model out of the `sysDescr` |
+| `Hardware` | Discoveries | Serial number and versions from the vendor's own MIBs |
+| `Resources` | Every poll, when HOST-RESOURCES-MIB lacks CPU or memory | CPU load and memory from the vendor's own MIBs |
+| `Optics` | Discoveries | Light levels from the vendor's own tables, into `optics.Readings` keyed by ifIndex |
+| `SensorTables` | Discoveries, when `Optics` finds nothing | Variants of ENTITY-SENSOR-MIB, described as `optics.SensorTable`s, tried before the standard one |
+
+Read tables with `snmp.WalkTable` (requesting only the columns used) and scalars with `snmp.GetRow`. To test a vendor against a simulated device, serve the values from a real device's `snmpwalk -On` with [snmptest](src/snmp/snmptest/agent.go): `snmptest.NewClient` returns a client to call the hooks with, as in [nokia_sros_test.go](src/vendors/nokia_sros_test.go).
 
 ## License
 
