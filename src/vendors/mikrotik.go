@@ -2,8 +2,10 @@ package vendors
 
 import (
 	"main/src/api"
+	"main/src/cli"
 	"main/src/optics"
 	"main/src/snmp"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -17,7 +19,27 @@ var mikroTik = &Vendor{
 	EnterpriseNumbers: []string{"14988"},
 	Model:             mikroTikModel,
 	Optics:            mikroTikOptics,
+	ConfigPlatforms:   []*ConfigPlatform{mikroTikRouterOS},
 }
+
+// mikroTikRouterOS logs in with console options after the username: no colors (c), no terminal detection (t), and a
+// wide, tall window (511w, 4098h) so nothing wraps or pages. The export's first line has the time it was made, which
+// is cut down to the RouterOS version so upgrades still show up as changes. RouterOS 7 leaves secrets out of exports.
+var mikroTikRouterOS = &ConfigPlatform{
+	ID:   "MIKROTIK_ROUTEROS",
+	Name: "MikroTik RouterOS",
+	Clean: func(config string) string {
+		return mikroTikExportTime.ReplaceAllString(config, "# $1")
+	},
+	Profile: cli.Profile{
+		Prompt:         regexp.MustCompile(`^\[[^\]]+@[^\]]+\] ?[\w/ -]*> ?$`),
+		UsernameSuffix: "+ct511w4098h",
+		Newline:        "\r\n",
+		Commands:       fixedCommands("/export"),
+	},
+}
+
+var mikroTikExportTime = regexp.MustCompile(`(?m)^# \S+ \S+ (by RouterOS .*)$`)
 
 // mikroTikModel reads a sysDescr such as "RouterOS CCR2004-16G-2S+"
 func mikroTikModel(description string) string {

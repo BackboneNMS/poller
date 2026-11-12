@@ -23,6 +23,10 @@ type Config struct {
 		Timeout              time.Duration `yaml:"timeout"`
 		Retries              int           `yaml:"retries"`
 	} `yaml:"snmp"`
+	ConfigBackup struct {
+		Concurrency int           `yaml:"concurrency"`
+		Timeout     time.Duration `yaml:"timeout"`
+	} `yaml:"config_backup"`
 }
 
 func New() *Config {
@@ -33,6 +37,8 @@ func New() *Config {
 	c.SNMP.DiscoveryConcurrency = 4
 	c.SNMP.Timeout = 5 * time.Second
 	c.SNMP.Retries = 1
+	c.ConfigBackup.Concurrency = 4
+	c.ConfigBackup.Timeout = 30 * time.Second
 
 	return c
 }
@@ -108,6 +114,14 @@ func (c *Config) validate() error {
 
 	if c.SNMP.Retries < 0 {
 		return errors.New("snmp.retries must not be negative")
+	}
+
+	if c.ConfigBackup.Concurrency < 1 {
+		return errors.New("config_backup.concurrency must be at least 1")
+	}
+
+	if c.ConfigBackup.Timeout <= 0 {
+		return errors.New("config_backup.timeout must be greater than 0")
 	}
 
 	return nil

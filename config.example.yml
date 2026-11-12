@@ -8,3 +8,6 @@ snmp:
   discovery_concurrency: 4
   timeout: 5s
   retries: 1
+config_backup:
+  concurrency: 4
+  timeout: 30s

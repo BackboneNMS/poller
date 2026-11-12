@@ -8,15 +8,11 @@ import (
 	"time"
 )
 
-func newTestDiscoveryQueue() *discoveryQueue {
-	return &discoveryQueue{
-		inFlight: make(map[string]struct{}),
-		finished: make(map[string]time.Time),
-		wake:     make(chan struct{}, 1),
-	}
+func newTestDiscoveryQueue() *deviceQueue {
+	return newDeviceQueue(discoveries.wants, discoveries.compare)
 }
 
-func queuedIDs(q *discoveryQueue) []string {
+func queuedIDs(q *deviceQueue) []string {
 	ids := make([]string, len(q.pending))
 
 	for i, device := range q.pending {

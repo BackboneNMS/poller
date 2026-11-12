@@ -2,6 +2,7 @@ package vendors
 
 import (
 	"main/src/api"
+	"main/src/cli"
 	"main/src/optics"
 	"main/src/snmp"
 	"regexp"
@@ -43,6 +44,27 @@ var nokiaSROS = &Vendor{
 	Hardware:          nokiaHardware,
 	Resources:         nokiaResources,
 	Optics:            nokiaOptics,
+	ConfigPlatforms:   []*ConfigPlatform{nokiaSROSConfig},
+}
+
+// nokiaSROSConfig handles both command lines: the classic CLI (a prompt like "*A:pe1#") and the model-driven CLI
+// (a prompt like "A:admin@pe1#", after a "[/]" context line), which spell the same commands differently. The
+// generated and finished times in the header change on every read.
+var nokiaSROSConfig = &ConfigPlatform{
+	ID:          "NOKIA_SROS",
+	Name:        "Nokia SR OS",
+	Description: regexp.MustCompile(`TiMOS`),
+	Clean:       dropLines(`^# (Generated|Finished) `, `^\[[^\]]*\]$`),
+	Profile: cli.Profile{
+		Prompt: regexp.MustCompile(`^\*?[AB]:[\w.\-@]+(>[\w.\-]+)*[#$] ?$`),
+		Commands: func(prompt string) []string {
+			if strings.Contains(prompt, "@") {
+				return []string{"environment more false", "admin show configuration"}
+			}
+
+			return []string{"environment no more", "admin display-config"}
+		},
+	},
 }
 
 func nokiaDescription(description string) (version, model string) {

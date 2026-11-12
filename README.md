@@ -1,6 +1,6 @@
 # Backbone Poller
 
-The open source polling agent for [Backbone NMS](https://backbonenms.com). Deploy it anywhere inside your management network and it will monitor every device you add to the Backbone dashboard over ICMP and SNMP. It needs no inbound ports and no database, and it reports to the Backbone polling servers rather than the dashboard, so monitoring keeps working while the dashboard is offline.
+The open source polling agent for [Backbone NMS](https://backbonenms.com). Deploy it anywhere inside your management network and it will monitor every device you add to the Backbone dashboard over ICMP and SNMP, and back up their configurations over SSH or Telnet. It needs no inbound ports and no database, and it reports to the Backbone polling servers rather than the dashboard, so monitoring keeps working while the dashboard is offline.
 
 ## How it works
 
@@ -9,10 +9,32 @@ The open source polling agent for [Backbone NMS](https://backbonenms.com). Deplo
 
    Every device gets a **status poll** each cycle: the system details, interface status and traffic counters, and CPU, memory and storage. A **full discovery** also walks the tables that rarely change (IP addresses, LLDP neighbors, inventory and transceiver light levels). The polling server marks the devices due for discovery in the device list, and the poller discovers them in the background, up to `snmp.discovery_concurrency` at a time, with requested rediscoveries first, then devices never discovered, then the ones discovered longest ago. A device being discovered is left out of that cycle's status poll.
 3. Results are pushed back to the polling server in batches (`POST /api/poller/results`), several at a time and gzip compressed when the server supports it. Uploads run alongside polling, so a slow upload does not hold up polling.
+4. Devices whose configuration is due to be backed up come with a `configBackup` in the device list. The poller backs them up in the background, up to `config_backup.concurrency` at a time, by logging in over SSH or Telnet and running the platform's commands (see [Config backups](#config-backups)), and submits each configuration on its own (`POST /api/poller/configs`).
 
 Several polling server URLs can be configured. The poller keeps using the one that answered last and fails over to the others, in order, when it cannot be reached or responds with a server error. Resubmitting a batch to another server after a timeout is safe, as the servers ignore results they already stored.
 
 Only outbound HTTPS to the polling servers is required. Interface throughput is calculated on the poller from the difference in octet counters between polls, so the first poll after a restart reports counters without rates.
+
+### Config backups
+
+SNMP cannot read a device's configuration: the closest it gets is Cisco's CONFIG-COPY-MIB, which needs write access and pushes the file to a TFTP or SCP server, and Juniper's JUNIPER-CFGMGMT-MIB only says when the configuration changed. So the poller logs in to the device's command line instead, the way RANCID and Oxidized do, with the logins stored on the dashboard (the organization's shared logins in order until one is accepted, or the device's own).
+
+The platform decides which commands turn off paging and print the configuration. It is chosen on the dashboard, or detected from the `sysObjectID` and `sysDescr` of the device's last SNMP discovery:
+
+| Platform | Commands |
+| --- | --- |
+| Cisco IOS / IOS XE | `enable` if needed, `terminal length 0`, `show running-config` |
+| Cisco NX-OS | `terminal length 0`, `show running-config` |
+| Cisco IOS XR | `terminal length 0`, `show running-config` |
+| Arista EOS | `enable` if needed, `terminal length 0`, `show running-config` |
+| Juniper Junos | `cli` from root's shell, `set cli screen-length 0`, `show configuration \| no-more` |
+| MikroTik RouterOS | `/export`, logging in as `user+ct511w4098h` to turn off colors and wrapping |
+| Nokia SR OS | `environment no more`, `admin display-config` (classic CLI) or `environment more false`, `admin show configuration` (MD-CLI) |
+| Nokia ISAM | `environment inhibit-alarms mode batch`, `info configure flat` |
+| HPE ProCurve / ArubaOS-Switch | `enable` if needed, `no page`, `show running-config` |
+| Ubiquiti EdgeOS / VyOS | `terminal length 0`, `show configuration commands \| cat` |
+
+Lines that change on every read (build banners, byte counts, "last changed" timestamps, NTP clock-period) are removed so the polling server only stores a new revision when something really changed. Over SSH, the host key fingerprint is recorded at the first backup and the device must present it from then on: a different key fails the backup before any credentials are sent. Older key exchanges and ciphers are offered after the modern ones, since a lot of network equipment supports nothing newer. The platforms have been tested against simulated devices, not real hardware.
 
 ### What is collected
 
@@ -67,6 +89,8 @@ Settings are read from `config.yml` in the working directory, if it exists. Envi
 | `snmp.discovery_concurrency` | | `4` | Maximum number of devices fully discovered at the same time, in the background |
 | `snmp.timeout` | | `5s` | Timeout for each SNMP request |
 | `snmp.retries` | | `1` | Retries for each SNMP request |
+| `config_backup.concurrency` | | `4` | Maximum number of devices backed up at the same time, in the background |
+| `config_backup.timeout` | | `30s` | Timeout for connecting to a device over SSH or Telnet, and for each wait for it to respond |
 
 Logs are written to stdout as JSON.
 
@@ -91,8 +115,9 @@ Everything vendor-specific lives in [src/vendors](src/vendors), one file per ven
 | `Resources` | Every poll, when HOST-RESOURCES-MIB lacks CPU or memory | CPU load and memory from the vendor's own MIBs |
 | `Optics` | Discoveries | Light levels from the vendor's own tables, into `optics.Readings` keyed by ifIndex |
 | `SensorTables` | Discoveries, when `Optics` finds nothing | Variants of ENTITY-SENSOR-MIB, described as `optics.SensorTable`s, tried before the standard one |
+| `ConfigPlatforms` | Config backups | The command lines the vendor's configurations are backed up from, as `ConfigPlatform`s ([configplatform.go](src/vendors/configplatform.go)): a prompt pattern, the commands to run, a `sysDescr` pattern for detection and a `Clean` for lines that change on every read. Their IDs must match the dashboard's `ConfigPlatform` enum |
 
-Read tables with `snmp.WalkTable` (requesting only the columns used) and scalars with `snmp.GetRow`. To test a vendor against a simulated device, serve the values from a real device's `snmpwalk -On` with [snmptest](src/snmp/snmptest/agent.go): `snmptest.NewClient` returns a client to call the hooks with, as in [nokia_sros_test.go](src/vendors/nokia_sros_test.go).
+Read tables with `snmp.WalkTable` (requesting only the columns used) and scalars with `snmp.GetRow`. To test a vendor against a simulated device, serve the values from a real device's `snmpwalk -On` with [snmptest](src/snmp/snmptest/agent.go): `snmptest.NewClient` returns a client to call the hooks with, as in [nokia_sros_test.go](src/vendors/nokia_sros_test.go). The SSH and Telnet session itself (logging in, `enable`, answering pagers) is in [src/cli](src/cli), tested against a simulated device in [fetch_test.go](src/cli/fetch_test.go).
 
 ## License
 

@@ -2,8 +2,10 @@ package vendors
 
 import (
 	"main/src/api"
+	"main/src/cli"
 	"main/src/optics"
 	"main/src/snmp"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -20,6 +22,27 @@ var juniper = &Vendor{
 	EnterpriseNumbers: []string{"2636"},
 	Model:             juniperModel,
 	Optics:            juniperOptics,
+	ConfigPlatforms:   []*ConfigPlatform{juniperJunos},
+}
+
+// juniperJunos logs root in to the FreeBSD shell (a "%" prompt), so it starts the CLI first. The commit line changes on
+// every commit, and the routing engine line ("{master:0}") is printed before every prompt of a virtual chassis.
+var juniperJunos = &ConfigPlatform{
+	ID:    "JUNIPER_JUNOS",
+	Name:  "Juniper Junos",
+	Clean: dropLines(`^## Last commit:`, `^\{\w+(:\d+)?\}$`),
+	Profile: cli.Profile{
+		Prompt: regexp.MustCompile(`^[\w.\-@:]+[>#%] ?$`),
+		Commands: func(prompt string) []string {
+			commands := []string{"set cli screen-length 0", "set cli screen-width 0", "show configuration | no-more"}
+
+			if strings.HasSuffix(strings.TrimSpace(prompt), "%") {
+				return append([]string{"cli"}, commands...)
+			}
+
+			return commands
+		},
+	},
 }
 
 // juniperModel reads a sysDescr such as "Juniper Networks, Inc. ex3300-48p Ethernet Switch, kernel JUNOS 15.1R7.9"

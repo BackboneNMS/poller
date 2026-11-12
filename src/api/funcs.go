@@ -63,6 +63,10 @@ func (c *Client) SubmitResults(ctx context.Context, results []PollResult) error 
 	return c.request(ctx, http.MethodPost, "/api/poller/results", submitResultsBody{Results: results}, nil)
 }
 
+func (c *Client) SubmitConfigResults(ctx context.Context, results []ConfigResult) error {
+	return c.request(ctx, http.MethodPost, "/api/poller/configs", submitConfigResultsBody{Results: results}, nil)
+}
+
 // request sends a request to the polling server that answered last, failing over to the others in order when it cannot
 // be reached or fails with a server error. Requests a server rejects (an invalid token, for example) are not retried,
 // since every server would reject them the same way. Resubmitting results is safe: the servers ignore duplicates.

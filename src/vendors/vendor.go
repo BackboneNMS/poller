@@ -34,6 +34,9 @@ type Vendor struct {
 	Optics func(client *gosnmp.GoSNMP, interfaces []api.Interface) (optics.Readings, error)
 	// SensorTables are vendor variants of ENTITY-SENSOR-MIB to try for light levels before the standard one
 	SensorTables []optics.SensorTable
+	// ConfigPlatforms are the command lines the family's configuration is backed up from, in the order they are
+	// tried when detecting a device's platform (see DetectConfigPlatform)
+	ConfigPlatforms []*ConfigPlatform
 }
 
 // Unknown is returned for devices from enterprises without a vendor definition. It has no name or hooks, so only the
@@ -41,6 +44,7 @@ type Vendor struct {
 var Unknown = &Vendor{}
 
 var registry = []*Vendor{
+	arista,
 	aviat,
 	cambium,
 	cisco,

@@ -32,6 +32,9 @@ const (
 	SNMPVersion1  = "1"
 	SNMPVersion2C = "2c"
 	SNMPVersion3  = "3"
+
+	ConfigProtocolSSH    = "SSH"
+	ConfigProtocolTelnet = "TELNET"
 )
 
 type DeviceList struct {
@@ -46,17 +49,19 @@ type DeviceList struct {
 // DiscoveryRequestedAt is set while someone has asked for a rediscovery from the dashboard, and LastDiscoveredAt orders
 // the queue so the devices discovered longest ago go first. PingOnly devices are only pinged, never queried over SNMP,
 // and are sent without credentials. Priority marks devices that were down or unknown at their last poll, which the
-// poller polls before the rest of the cycle so outages and recoveries show up sooner.
+// poller polls before the rest of the cycle so outages and recoveries show up sooner. ConfigBackup is only set when
+// the device's configuration is due to be backed up.
 type Device struct {
-	ID                   string     `json:"_id"`
-	Name                 string     `json:"name"`
-	Host                 string     `json:"host"`
-	PingOnly             bool       `json:"pingOnly"`
-	SNMP                 DeviceSNMP `json:"snmp"`
-	Discover             bool       `json:"discover"`
-	DiscoveryRequestedAt *time.Time `json:"discoveryRequestedAt"`
-	LastDiscoveredAt     *time.Time `json:"lastDiscoveredAt"`
-	Priority             bool       `json:"priority"`
+	ID                   string        `json:"_id"`
+	Name                 string        `json:"name"`
+	Host                 string        `json:"host"`
+	PingOnly             bool          `json:"pingOnly"`
+	SNMP                 DeviceSNMP    `json:"snmp"`
+	Discover             bool          `json:"discover"`
+	DiscoveryRequestedAt *time.Time    `json:"discoveryRequestedAt"`
+	LastDiscoveredAt     *time.Time    `json:"lastDiscoveredAt"`
+	Priority             bool          `json:"priority"`
+	ConfigBackup         *ConfigBackup `json:"configBackup"`
 }
 
 type DeviceSNMP struct {
@@ -75,6 +80,46 @@ type SNMPCredential struct {
 	AuthPassword    string  `json:"authPassword"`
 	PrivacyProtocol string  `json:"privacyProtocol"`
 	PrivacyPassword string  `json:"privacyPassword"`
+}
+
+// ConfigBackup asks for a device's configuration to be read over SSH or Telnet. Platform is the ID of the command line
+// to use, or empty to detect it from the ObjectID and Description (sysObjectID and sysDescr) of the last discovery.
+// HostKey is the SSH host key fingerprint recorded at the first backup, which the device must still present, or empty
+// to accept and record any. RequestedAt is set while someone has asked for a backup from the dashboard, and
+// LastAttemptAt orders the queue so the devices backed up longest ago go first.
+type ConfigBackup struct {
+	Platform      string          `json:"platform"`
+	ObjectID      string          `json:"objectID"`
+	Description   string          `json:"description"`
+	Protocol      string          `json:"protocol"`
+	Port          uint16          `json:"port"`
+	HostKey       string          `json:"hostKey"`
+	Credentials   []CLICredential `json:"credentials"`
+	RequestedAt   *time.Time      `json:"requestedAt"`
+	LastAttemptAt *time.Time      `json:"lastAttemptAt"`
+}
+
+// CLICredential is one login to try, in the order the polling server sends them. ID is nil for a login that belongs
+// to a single device, and set for the organization's shared logins.
+type CLICredential struct {
+	ID             *string `json:"id"`
+	Username       string  `json:"username"`
+	Password       string  `json:"password"`
+	EnablePassword string  `json:"enablePassword"`
+}
+
+// ConfigResult is the outcome of backing up one device's configuration: Config on success, Error otherwise. Platform
+// is the ID of the command line used, CredentialID the shared login that worked, and HostKey the SSH host key
+// fingerprint the device presented (nil over Telnet, or when the connection failed before one was seen).
+type ConfigResult struct {
+	DeviceID     string    `json:"deviceID"`
+	StartedAt    time.Time `json:"startedAt"`
+	DurationMS   int64     `json:"durationMS"`
+	Platform     *string   `json:"platform"`
+	CredentialID *string   `json:"credentialID"`
+	HostKey      *string   `json:"hostKey"`
+	Config       *string   `json:"config"`
+	Error        *string   `json:"error"`
 }
 
 // PollResult is the outcome of polling one device. Discovery is true for a full discovery. A status poll (false)
@@ -179,4 +224,8 @@ type Storage struct {
 
 type submitResultsBody struct {
 	Results []PollResult `json:"results"`
+}
+
+type submitConfigResultsBody struct {
+	Results []ConfigResult `json:"results"`
 }

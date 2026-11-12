@@ -2,7 +2,9 @@ package vendors
 
 import (
 	"main/src/api"
+	"main/src/cli"
 	"main/src/snmp"
+	"regexp"
 
 	"github.com/gosnmp/gosnmp"
 )
@@ -26,6 +28,18 @@ var nokiaISAM = &Vendor{
 	EnterpriseNumbers: []string{"637"},
 	Hardware:          isamHardware,
 	Resources:         isamResources,
+	ConfigPlatforms:   []*ConfigPlatform{nokiaISAMConfig},
+}
+
+// nokiaISAMConfig turns off alarm messages and paging (batch mode) before printing the configuration as flat
+// commands. Its prompt is the shelf type and user, such as "typ:isadmin>#".
+var nokiaISAMConfig = &ConfigPlatform{
+	ID:   "NOKIA_ISAM",
+	Name: "Nokia ISAM",
+	Profile: cli.Profile{
+		Prompt:   regexp.MustCompile(`^[\w.\-]+:[\w.\-]+[>#]+ ?$`),
+		Commands: fixedCommands("environment inhibit-alarms mode batch terminal-timeout timeout:360", "info configure flat"),
+	},
 }
 
 // isamHardware reads the shelf type and serial number, and the software version

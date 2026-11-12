@@ -63,6 +63,7 @@ func PollAllDevices(ctx context.Context) time.Duration {
 	pruneDeviceState(list.Devices)
 
 	queued := discoveries.Schedule(list.Devices, startedAt)
+	backupsQueued := configBackups.Schedule(list.Devices, startedAt)
 
 	var (
 		wg        sync.WaitGroup
@@ -133,6 +134,7 @@ dispatch:
 		"unreachable", failed.Load(),
 		"skippedWhileDiscovering", skipped.Load(),
 		"discoveriesQueued", queued,
+		"configBackupsQueued", backupsQueued,
 		"duration", time.Since(startedAt).Round(time.Millisecond).String(),
 		"interval", interval.String(),
 	)
