@@ -5,7 +5,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"main/src/dashboard"
+	"main/src/api"
+	"main/src/entity"
+	"main/src/snmp"
+	"main/src/vendors"
 	"net"
 	"slices"
 	"strconv"
@@ -18,7 +21,6 @@ import (
 )
 
 const (
-	oidEnterprises               = "1.3.6.1.4.1"
 	oidSystemDescription         = "1.3.6.1.2.1.1.1.0"
 	oidSystemObjectID            = "1.3.6.1.2.1.1.2.0"
 	oidSystemUptime              = "1.3.6.1.2.1.1.3.0"
@@ -28,39 +30,34 @@ const (
 	oidInterfaceEntry            = "1.3.6.1.2.1.2.2.1"
 	oidInterfaceExtensionEntry   = "1.3.6.1.2.1.31.1.1.1"
 	oidIPAddressEntry            = "1.3.6.1.2.1.4.20.1"
-	oidPhysicalEntityEntry       = "1.3.6.1.2.1.47.1.1.1.1"
 	oidProcessorEntry            = "1.3.6.1.2.1.25.3.3.1"
 	oidStorageEntry              = "1.3.6.1.2.1.25.2.3.1"
 	oidStorageTypes              = "1.3.6.1.2.1.25.2.1"
 	oidLLDPLocalPortEntry        = "1.0.8802.1.1.2.1.3.7.1"
 	oidLLDPRemoteEntry           = "1.0.8802.1.1.2.1.4.1.1"
 	oidLLDPRemoteManagementEntry = "1.0.8802.1.1.2.1.4.2.1"
-
-	inventoryClassChassis = "CHASSIS"
-	inventoryClassOther   = "OTHER"
 )
 
-type snmpRow map[int]gosnmp.SnmpPDU
-
-func NewSNMPClient(ctx context.Context, target string, settings dashboard.DeviceSNMP) (*gosnmp.GoSNMP, error) {
+func NewSNMPClient(ctx context.Context, target string, port uint16, settings api.SNMPCredential) (*gosnmp.GoSNMP, error) {
 	client := &gosnmp.GoSNMP{
 		Context:   ctx,
 		Target:    target,
-		Port:      settings.Port,
+		Port:      port,
 		Transport: "udp",
 		Timeout:   conf.SNMP.Timeout,
 		Retries:   conf.SNMP.Retries,
-		MaxOids:   gosnmp.MaxOids,
 	}
 
+	snmp.ApplyLimits(client, snmp.DefaultLimits)
+
 	switch settings.Version {
-	case dashboard.SNMPVersion1:
+	case api.SNMPVersion1:
 		client.Version = gosnmp.Version1
 		client.Community = settings.Community
-	case dashboard.SNMPVersion2C:
+	case api.SNMPVersion2C:
 		client.Version = gosnmp.Version2c
 		client.Community = settings.Community
-	case dashboard.SNMPVersion3:
+	case api.SNMPVersion3:
 		flags, parameters, err := snmpSecurityParameters(settings)
 
 		if err != nil {
@@ -78,7 +75,7 @@ func NewSNMPClient(ctx context.Context, target string, settings dashboard.Device
 	return client, nil
 }
 
-func snmpSecurityParameters(settings dashboard.DeviceSNMP) (gosnmp.SnmpV3MsgFlags, *gosnmp.UsmSecurityParameters, error) {
+func snmpSecurityParameters(settings api.SNMPCredential) (gosnmp.SnmpV3MsgFlags, *gosnmp.UsmSecurityParameters, error) {
 	if len(settings.Username) < 1 {
 		return 0, nil, errors.New("snmpSecurityParameters: a username is required for SNMP version 3")
 	}
@@ -157,57 +154,129 @@ func snmpPrivacyProtocol(name string) (gosnmp.SnmpV3PrivProtocol, error) {
 }
 
 type snmpData struct {
-	System     *dashboard.System
-	Interfaces []dashboard.Interface
-	Neighbors  []dashboard.Neighbor
-	Resources  *dashboard.Resources
+	CredentialID    *string
+	System          *api.System
+	Interfaces      []api.Interface
+	Neighbors       []api.Neighbor
+	Inventory       []api.InventoryItem
+	ForwardingTable []api.ForwardingEntry
+	Resources       *api.Resources
 }
 
-type inventoryItem struct {
-	Class           string
-	Manufacturer    string
-	Model           string
-	SerialNumber    string
-	HardwareVersion string
-	FirmwareVersion string
-	SoftwareVersion string
-}
-
-func CollectSNMPData(ctx context.Context, device dashboard.Device, polledAt time.Time) (*snmpData, error) {
-	client, err := NewSNMPClient(ctx, device.Host, device.SNMP)
-
-	if err != nil {
-		return nil, err
+// connectSNMP tries each of the device's credentials in order and returns a connected client for the first one the agent
+// answers, along with the system details it returned and the credential. Agents silently drop requests with an unknown community, so a wrong
+// credential costs one SNMP timeout before the next one is tried. Devices that did not answer on their last poll are
+// probed without retries, since most of them will not answer this time either and each retry costs another timeout.
+func connectSNMP(ctx context.Context, device api.Device, wasUnreachable bool) (*gosnmp.GoSNMP, *api.System, api.SNMPCredential, error) {
+	if len(device.SNMP.Credentials) < 1 {
+		return nil, nil, api.SNMPCredential{}, errors.New("connectSNMP: no SNMP credentials are configured for this device")
 	}
 
-	if err = client.Connect(); err != nil {
+	var lastErr error
+
+	for _, credential := range device.SNMP.Credentials {
+		client, err := NewSNMPClient(ctx, device.Host, device.SNMP.Port, credential)
+
+		if err != nil {
+			lastErr = err
+
+			continue
+		}
+
+		if err = client.Connect(); err != nil {
+			lastErr = err
+
+			continue
+		}
+
+		if wasUnreachable {
+			client.Retries = 0
+		}
+
+		system, err := collectSystem(client)
+
+		if err == nil {
+			client.Retries = conf.SNMP.Retries
+
+			return client, system, credential, nil
+		}
+
+		client.Conn.Close()
+
+		if ctx.Err() != nil {
+			return nil, nil, api.SNMPCredential{}, ctx.Err()
+		}
+
+		lastErr = err
+	}
+
+	if len(device.SNMP.Credentials) == 1 {
+		return nil, nil, api.SNMPCredential{}, lastErr
+	}
+
+	return nil, nil, api.SNMPCredential{}, fmt.Errorf("connectSNMP: none of the %d SNMP credentials received a response, last error: %w", len(device.SNMP.Credentials), lastErr)
+}
+
+// CollectSNMPData polls a device over SNMP. A status poll (discover false) reads only what changes from poll to poll:
+// the system details, interface status and counters, and resources. A discovery also walks the tables that change
+// less often (IP addresses, LLDP neighbors, inventory, transceivers and the forwarding table), which is most of the
+// work on large devices.
+func CollectSNMPData(ctx context.Context, device api.Device, polledAt time.Time, wasUnreachable, discover bool) (*snmpData, error) {
+	client, system, credential, err := connectSNMP(ctx, device, wasUnreachable)
+
+	if err != nil {
 		return nil, err
 	}
 
 	defer client.Conn.Close()
 
-	system, err := collectSystem(client)
+	vendor := vendors.Identify(system.ObjectID)
+
+	snmp.ApplyLimits(client, vendor.Limits())
+
+	interfaces, err := collectInterfaces(client, polledAt.Add(-time.Duration(system.UptimeSeconds)*time.Second), discover)
 
 	if err != nil {
 		return nil, err
 	}
 
-	interfaces, err := collectInterfaces(client, polledAt.Add(-time.Duration(system.UptimeSeconds)*time.Second))
-
-	if err != nil {
-		return nil, err
+	data := &snmpData{
+		CredentialID: credential.ID,
+		System:       system,
+		Interfaces:   interfaces,
+		Neighbors:    make([]api.Neighbor, 0),
 	}
 
-	neighbors, err := collectNeighbors(client, interfaces)
+	if discover {
+		if data.Neighbors, err = collectNeighbors(client, interfaces); err != nil {
+			return nil, err
+		}
 
-	if err != nil {
-		return nil, err
-	}
+		entities, err := entity.Walk(client)
 
-	inventory, err := collectInventory(client)
+		if err != nil {
+			return nil, err
+		}
 
-	if err != nil {
-		return nil, err
+		if err = collectOptics(client, vendor, entities, interfaces); err != nil {
+			logger.Warn("Failed to collect transceiver diagnostics", "device", device.Name, "host", device.Host, "error", err)
+		}
+
+		data.Inventory = collectInventory(entities, interfaces)
+
+		applyInventoryTransceivers(data.Inventory, entities, interfaces)
+		applyHardwareDetails(system, data.Inventory, vendor)
+
+		if vendor.Hardware != nil {
+			if err = vendor.Hardware(client, system); err != nil {
+				logger.Warn("Failed to collect vendor hardware details", "device", device.Name, "host", device.Host, "vendor", vendor.Name, "error", err)
+			}
+		}
+
+		// Left nil when it fails, so the polling server keeps the forwarding table from the last discovery
+		if data.ForwardingTable, err = collectForwardingTable(ctx, client, device, credential, vendor, interfaces); err != nil {
+			logger.Warn("Failed to collect forwarding table", "device", device.Name, "host", device.Host, "error", err)
+		}
 	}
 
 	resources, err := collectResources(client)
@@ -216,17 +285,18 @@ func CollectSNMPData(ctx context.Context, device dashboard.Device, polledAt time
 		return nil, err
 	}
 
-	applyHardwareDetails(system, inventory)
+	if vendor.Resources != nil && (resources.CPULoadPercent == nil || resources.MemoryTotalBytes == nil) {
+		if err = vendor.Resources(client, resources); err != nil {
+			logger.Warn("Failed to collect vendor CPU and memory", "device", device.Name, "host", device.Host, "vendor", vendor.Name, "error", err)
+		}
+	}
 
-	return &snmpData{
-		System:     system,
-		Interfaces: interfaces,
-		Neighbors:  neighbors,
-		Resources:  resources,
-	}, nil
+	data.Resources = resources
+
+	return data, nil
 }
 
-func collectSystem(client *gosnmp.GoSNMP) (*dashboard.System, error) {
+func collectSystem(client *gosnmp.GoSNMP) (*api.System, error) {
 	packet, err := client.Get([]string{
 		oidSystemDescription,
 		oidSystemObjectID,
@@ -244,48 +314,64 @@ func collectSystem(client *gosnmp.GoSNMP) (*dashboard.System, error) {
 		return nil, fmt.Errorf("collectSystem: agent responded with error %s", packet.Error)
 	}
 
-	system := &dashboard.System{}
+	system := &api.System{}
 
 	for _, pdu := range packet.Variables {
 		switch strings.TrimPrefix(pdu.Name, ".") {
 		case oidSystemDescription:
-			system.Description = pduString(pdu)
+			system.Description = snmp.PDUString(pdu)
 		case oidSystemObjectID:
-			system.ObjectID = pduString(pdu)
+			system.ObjectID = snmp.PDUString(pdu)
 		case oidSystemUptime:
-			system.UptimeSeconds = pduInt(pdu) / 100
+			system.UptimeSeconds = snmp.PDUInt(pdu) / 100
 		case oidSystemContact:
-			system.Contact = pduString(pdu)
+			system.Contact = snmp.PDUString(pdu)
 		case oidSystemName:
-			system.Name = pduString(pdu)
+			system.Name = snmp.PDUString(pdu)
 		case oidSystemLocation:
-			system.Location = pduString(pdu)
+			system.Location = snmp.PDUString(pdu)
 		}
 	}
 
 	return system, nil
 }
 
-func collectInterfaces(client *gosnmp.GoSNMP, bootedAt time.Time) ([]dashboard.Interface, error) {
-	rows, err := walkTable(client, oidInterfaceEntry)
+// collectInterfaces reads the interface tables. A status poll reads the name, speed and 64-bit counters (ifXTable) and
+// the status, last change, discard and error columns (ifTable); a discovery also reads the description, type, MTU, MAC
+// address, alias and IP addresses, which the polling server keeps from the last discovery in between. The 32-bit
+// counters and speed in ifTable are only read for the interfaces that lack the ifXTable ones.
+func collectInterfaces(client *gosnmp.GoSNMP, bootedAt time.Time, discover bool) ([]api.Interface, error) {
+	columns, extensionColumns := []int{7, 8, 9, 13, 14, 19, 20}, []int{1, 6, 10, 15}
+
+	if discover {
+		columns, extensionColumns = append([]int{2, 3, 4, 6}, columns...), append(extensionColumns, 18)
+	}
+
+	extensionRows, err := snmp.WalkTable(client, oidInterfaceExtensionEntry, extensionColumns...)
 
 	if err != nil {
 		return nil, err
 	}
 
-	extensionRows, err := walkTable(client, oidInterfaceExtensionEntry)
+	rows, err := snmp.WalkTable(client, oidInterfaceEntry, columns...)
 
 	if err != nil {
 		return nil, err
 	}
 
-	addresses, err := collectIPAddresses(client)
-
-	if err != nil {
+	if err = snmp.FillColumns(client, oidInterfaceEntry, rows, interfaceFallbacks(rows, extensionRows)); err != nil {
 		return nil, err
 	}
 
-	interfaces := make([]dashboard.Interface, 0, len(rows))
+	addresses := make(map[int][]string)
+
+	if discover {
+		if addresses, err = collectIPAddresses(client); err != nil {
+			return nil, err
+		}
+	}
+
+	interfaces := make([]api.Interface, 0, len(rows))
 
 	for index, row := range rows {
 		interfaceIndex, err := strconv.Atoi(index)
@@ -295,27 +381,27 @@ func collectInterfaces(client *gosnmp.GoSNMP, bootedAt time.Time) ([]dashboard.I
 		}
 
 		extensionRow := extensionRows[index]
-		ianaType := int(rowInt(row, 3))
+		ianaType := int(row.Int(3))
 
-		item := dashboard.Interface{
+		item := api.Interface{
 			Index:              interfaceIndex,
-			Name:               rowString(extensionRow, 1),
-			Description:        rowString(row, 2),
-			Alias:              rowString(extensionRow, 18),
+			Name:               extensionRow.String(1),
+			Description:        row.String(2),
+			Alias:              extensionRow.String(18),
 			Type:               interfaceType(ianaType),
-			MTU:                int(rowInt(row, 4)),
+			MTU:                int(row.Int(4)),
 			SpeedBitsPerSecond: interfaceSpeed(row, extensionRow),
-			MACAddress:         formatMACAddress(rowBytes(row, 6)),
-			AdminStatus:        interfaceStatus(rowInt(row, 7)),
-			OperStatus:         interfaceStatus(rowInt(row, 8)),
-			LastChangedAt:      interfaceLastChangedAt(bootedAt, rowInt(row, 9)),
+			MACAddress:         formatMACAddress(row.Bytes(6)),
+			AdminStatus:        interfaceStatus(row.Int(7)),
+			OperStatus:         interfaceStatus(row.Int(8)),
+			LastChangedAt:      interfaceLastChangedAt(bootedAt, row.Int(9)),
 			Addresses:          addresses[interfaceIndex],
 			InOctets:           rowCounter(extensionRow, 6, row, 10),
 			OutOctets:          rowCounter(extensionRow, 10, row, 16),
-			InDiscards:         rowInt(row, 13),
-			OutDiscards:        rowInt(row, 19),
-			InErrors:           rowInt(row, 14),
-			OutErrors:          rowInt(row, 20),
+			InDiscards:         row.Int(13),
+			OutDiscards:        row.Int(19),
+			InErrors:           row.Int(14),
+			OutErrors:          row.Int(20),
 		}
 
 		if len(item.Name) < 1 {
@@ -329,15 +415,40 @@ func collectInterfaces(client *gosnmp.GoSNMP, bootedAt time.Time) ([]dashboard.I
 		interfaces = append(interfaces, item)
 	}
 
-	slices.SortFunc(interfaces, func(a, b dashboard.Interface) int {
+	slices.SortFunc(interfaces, func(a, b api.Interface) int {
 		return a.Index - b.Index
 	})
 
 	return interfaces, nil
 }
 
+// interfaceFallbacks lists the interfaces that need ifTable's speed (ifSpeed) or 32-bit counters (ifInOctets,
+// ifOutOctets) because ifXTable has no usable value for them: no ifHighSpeed, or 0 for interfaces slower than 1 Mbit/s,
+// and no 64-bit counters
+func interfaceFallbacks(rows, extensionRows map[string]snmp.Row) map[int][]string {
+	needs := make(map[int][]string)
+
+	for index := range rows {
+		extensionRow := extensionRows[index]
+
+		if extensionRow.Int(15) <= 0 {
+			needs[5] = append(needs[5], index)
+		}
+
+		if _, ok := extensionRow.Number(6); !ok {
+			needs[10] = append(needs[10], index)
+		}
+
+		if _, ok := extensionRow.Number(10); !ok {
+			needs[16] = append(needs[16], index)
+		}
+	}
+
+	return needs
+}
+
 func collectIPAddresses(client *gosnmp.GoSNMP) (map[int][]string, error) {
-	rows, err := walkTable(client, oidIPAddressEntry)
+	rows, err := snmp.WalkTable(client, oidIPAddressEntry, 2, 3)
 
 	if err != nil {
 		return nil, err
@@ -347,14 +458,14 @@ func collectIPAddresses(client *gosnmp.GoSNMP) (map[int][]string, error) {
 
 	for index, row := range rows {
 		ipAddress := net.ParseIP(index).To4()
-		mask := net.ParseIP(rowString(row, 3)).To4()
+		mask := net.ParseIP(row.String(3)).To4()
 
 		if ipAddress == nil || mask == nil {
 			continue
 		}
 
 		prefixLength, _ := net.IPMask(mask).Size()
-		interfaceIndex := int(rowInt(row, 2))
+		interfaceIndex := int(row.Int(2))
 
 		addresses[interfaceIndex] = append(addresses[interfaceIndex], fmt.Sprintf("%s/%d", ipAddress, prefixLength))
 	}
@@ -366,14 +477,14 @@ func collectIPAddresses(client *gosnmp.GoSNMP) (map[int][]string, error) {
 	return addresses, nil
 }
 
-func collectNeighbors(client *gosnmp.GoSNMP, interfaces []dashboard.Interface) ([]dashboard.Neighbor, error) {
-	localPorts, err := walkTable(client, oidLLDPLocalPortEntry)
+func collectNeighbors(client *gosnmp.GoSNMP, interfaces []api.Interface) ([]api.Neighbor, error) {
+	localPorts, err := snmp.WalkTable(client, oidLLDPLocalPortEntry, 2, 3, 4)
 
 	if err != nil {
 		return nil, err
 	}
 
-	rows, err := walkTable(client, oidLLDPRemoteEntry)
+	rows, err := snmp.WalkTable(client, oidLLDPRemoteEntry, 4, 5, 6, 7, 8, 9, 10)
 
 	if err != nil {
 		return nil, err
@@ -385,7 +496,7 @@ func collectNeighbors(client *gosnmp.GoSNMP, interfaces []dashboard.Interface) (
 		return nil, err
 	}
 
-	neighbors := make([]dashboard.Neighbor, 0, len(rows))
+	neighbors := make([]api.Neighbor, 0, len(rows))
 
 	for index, row := range rows {
 		parts := strings.Split(index, ".")
@@ -396,14 +507,14 @@ func collectNeighbors(client *gosnmp.GoSNMP, interfaces []dashboard.Interface) (
 
 		localPort := localPorts[parts[1]]
 
-		item := dashboard.Neighbor{
-			LocalPortID:          lldpIdentifier(rowInt(localPort, 2), rowBytes(localPort, 3), 3, 4),
-			LocalPortDescription: rowString(localPort, 4),
-			ChassisID:            lldpIdentifier(rowInt(row, 4), rowBytes(row, 5), 4, 5),
-			PortID:               lldpIdentifier(rowInt(row, 6), rowBytes(row, 7), 3, 4),
-			PortDescription:      rowString(row, 8),
-			SystemName:           rowString(row, 9),
-			SystemDescription:    rowString(row, 10),
+		item := api.Neighbor{
+			LocalPortID:          lldpIdentifier(localPort.Int(2), localPort.Bytes(3), 3, 4),
+			LocalPortDescription: localPort.String(4),
+			ChassisID:            lldpIdentifier(row.Int(4), row.Bytes(5), 4, 5),
+			PortID:               lldpIdentifier(row.Int(6), row.Bytes(7), 3, 4),
+			PortDescription:      row.String(8),
+			SystemName:           row.String(9),
+			SystemDescription:    row.String(10),
 			ManagementAddresses:  managementAddresses[index],
 		}
 
@@ -416,7 +527,7 @@ func collectNeighbors(client *gosnmp.GoSNMP, interfaces []dashboard.Interface) (
 		neighbors = append(neighbors, item)
 	}
 
-	slices.SortFunc(neighbors, func(a, b dashboard.Neighbor) int {
+	slices.SortFunc(neighbors, func(a, b api.Neighbor) int {
 		if c := strings.Compare(a.LocalPortID, b.LocalPortID); c != 0 {
 			return c
 		}
@@ -428,7 +539,7 @@ func collectNeighbors(client *gosnmp.GoSNMP, interfaces []dashboard.Interface) (
 }
 
 func collectLLDPManagementAddresses(client *gosnmp.GoSNMP) (map[string][]string, error) {
-	rows, err := walkTable(client, oidLLDPRemoteManagementEntry)
+	rows, err := snmp.WalkTable(client, oidLLDPRemoteManagementEntry, 3, 4, 5)
 
 	if err != nil {
 		return nil, err
@@ -480,63 +591,104 @@ func collectLLDPManagementAddresses(client *gosnmp.GoSNMP) (map[string][]string,
 	return addresses, nil
 }
 
-func collectInventory(client *gosnmp.GoSNMP) ([]inventoryItem, error) {
-	rows, err := walkTable(client, oidPhysicalEntityEntry)
+// collectInventory lists the physical parts of a device: every entity except sensors that has a model or serial number
+// or belongs to an interface (ports and the transceivers in them)
+func collectInventory(entities *entity.Table, interfaces []api.Interface) []api.InventoryItem {
+	inventory := make([]api.InventoryItem, 0)
 
-	if err != nil {
-		return nil, err
-	}
+	for _, index := range snmp.SortedIndexes(entities.Rows) {
+		row := entities.Rows[index]
+		entityIndex, err := strconv.Atoi(index)
 
-	indexes := make([]int, 0, len(rows))
-
-	for index := range rows {
-		if entityIndex, err := strconv.Atoi(index); err == nil {
-			indexes = append(indexes, entityIndex)
-		}
-	}
-
-	slices.Sort(indexes)
-
-	inventory := make([]inventoryItem, 0)
-
-	for _, entityIndex := range indexes {
-		row := rows[strconv.Itoa(entityIndex)]
-
-		item := inventoryItem{
-			Class:           inventoryClass(rowInt(row, 5)),
-			Manufacturer:    rowString(row, 12),
-			Model:           rowString(row, 13),
-			SerialNumber:    rowString(row, 11),
-			HardwareVersion: rowString(row, 8),
-			FirmwareVersion: rowString(row, 9),
-			SoftwareVersion: rowString(row, 10),
+		if err != nil || row.Int(entity.ColumnClass) == entity.ClassSensor {
+			continue
 		}
 
-		if len(item.Model) < 1 && len(item.SerialNumber) < 1 {
+		item := api.InventoryItem{
+			Index:           entityIndex,
+			Class:           inventoryClass(row.Int(entity.ColumnClass)),
+			Name:            row.String(entity.ColumnName),
+			Description:     row.String(entity.ColumnDescription),
+			Manufacturer:    row.String(entity.ColumnManufacturer),
+			Model:           row.String(entity.ColumnModel),
+			SerialNumber:    row.String(entity.ColumnSerialNumber),
+			HardwareVersion: row.String(entity.ColumnHardwareVersion),
+			FirmwareVersion: row.String(entity.ColumnFirmwareVersion),
+			SoftwareVersion: row.String(entity.ColumnSoftwareVersion),
+		}
+
+		if parent := row.Int(entity.ColumnContainedIn); parent > 0 {
+			item.ParentIndex = PointerOf(int(parent))
+		}
+
+		if interfaceIndex, ok := entities.Interface(index, interfaces); ok {
+			item.InterfaceIndex = PointerOf(interfaceIndex)
+		}
+
+		if len(item.Model) < 1 && len(item.SerialNumber) < 1 && item.InterfaceIndex == nil {
 			continue
 		}
 
 		inventory = append(inventory, item)
 	}
 
-	return inventory, nil
+	return inventory
 }
 
-func collectResources(client *gosnmp.GoSNMP) (*dashboard.Resources, error) {
-	processors, err := walkTable(client, oidProcessorEntry)
+// applyInventoryTransceivers fills in the transceiver of interfaces the vendor's optics tables did not identify, from
+// the innermost inventory item belonging to the interface that has a model or serial number (the transceiver, rather
+// than the port holding it)
+func applyInventoryTransceivers(inventory []api.InventoryItem, entities *entity.Table, interfaces []api.Interface) {
+	innermost := make(map[int]api.InventoryItem)
+	depths := make(map[int]int)
+
+	for _, item := range inventory {
+		if item.InterfaceIndex == nil || item.Class == api.InventoryClassChassis || (len(item.Model) < 1 && len(item.SerialNumber) < 1) {
+			continue
+		}
+
+		depth := entities.Depth(strconv.Itoa(item.Index))
+
+		if current, ok := depths[*item.InterfaceIndex]; ok && current >= depth {
+			continue
+		}
+
+		innermost[*item.InterfaceIndex] = item
+		depths[*item.InterfaceIndex] = depth
+	}
+
+	for i := range interfaces {
+		item, ok := innermost[interfaces[i].Index]
+
+		if !ok || interfaces[i].Transceiver != nil {
+			continue
+		}
+
+		interfaces[i].Transceiver = &api.Transceiver{
+			Type:            item.Description,
+			Manufacturer:    item.Manufacturer,
+			Model:           item.Model,
+			SerialNumber:    item.SerialNumber,
+			HardwareVersion: item.HardwareVersion,
+		}
+	}
+}
+
+func collectResources(client *gosnmp.GoSNMP) (*api.Resources, error) {
+	processors, err := snmp.WalkTable(client, oidProcessorEntry, 2)
 
 	if err != nil {
 		return nil, err
 	}
 
-	rows, err := walkTable(client, oidStorageEntry)
+	rows, err := snmp.WalkTable(client, oidStorageEntry, 2, 3, 4, 5, 6)
 
 	if err != nil {
 		return nil, err
 	}
 
-	resources := &dashboard.Resources{
-		Storage: make([]dashboard.Storage, 0, len(rows)),
+	resources := &api.Resources{
+		Storage: make([]api.Storage, 0, len(rows)),
 	}
 
 	var (
@@ -545,7 +697,7 @@ func collectResources(client *gosnmp.GoSNMP) (*dashboard.Resources, error) {
 	)
 
 	for _, row := range processors {
-		if load, ok := rowNumber(row, 2); ok {
+		if load, ok := row.Number(2); ok {
 			processorCount++
 			processorTotal += load
 		}
@@ -562,23 +714,23 @@ func collectResources(client *gosnmp.GoSNMP) (*dashboard.Resources, error) {
 			continue
 		}
 
-		allocationUnits := rowInt(row, 4)
+		allocationUnits := row.Int(4)
 
-		resources.Storage = append(resources.Storage, dashboard.Storage{
+		resources.Storage = append(resources.Storage, api.Storage{
 			Index:       storageIndex,
-			Type:        storageType(rowString(row, 2)),
-			Description: rowString(row, 3),
-			SizeBytes:   rowInt(row, 5) * allocationUnits,
-			UsedBytes:   rowInt(row, 6) * allocationUnits,
+			Type:        storageType(row.String(2)),
+			Description: row.String(3),
+			SizeBytes:   row.Int(5) * allocationUnits,
+			UsedBytes:   row.Int(6) * allocationUnits,
 		})
 	}
 
-	slices.SortFunc(resources.Storage, func(a, b dashboard.Storage) int {
+	slices.SortFunc(resources.Storage, func(a, b api.Storage) int {
 		return a.Index - b.Index
 	})
 
 	for _, storage := range resources.Storage {
-		if storage.Type == dashboard.StorageTypeRAM {
+		if storage.Type == api.StorageTypeRAM {
 			resources.MemoryTotalBytes = PointerOf(storage.SizeBytes)
 			resources.MemoryUsedBytes = PointerOf(storage.UsedBytes)
 
@@ -589,9 +741,9 @@ func collectResources(client *gosnmp.GoSNMP) (*dashboard.Resources, error) {
 	return resources, nil
 }
 
-func applyHardwareDetails(system *dashboard.System, inventory []inventoryItem) {
+func applyHardwareDetails(system *api.System, inventory []api.InventoryItem, vendor *vendors.Vendor) {
 	for _, item := range inventory {
-		if item.Class != inventoryClassChassis {
+		if item.Class != api.InventoryClassChassis || (len(item.Model) < 1 && len(item.SerialNumber) < 1) {
 			continue
 		}
 
@@ -605,184 +757,21 @@ func applyHardwareDetails(system *dashboard.System, inventory []inventoryItem) {
 		break
 	}
 
-	enterpriseNumber := objectIDEnterpriseNumber(system.ObjectID)
-
-	if manufacturer := enterpriseManufacturer(enterpriseNumber); len(manufacturer) > 0 {
-		system.Manufacturer = manufacturer
+	if len(vendor.Name) > 0 {
+		system.Manufacturer = vendor.Name
 	}
 
-	if len(system.Model) < 1 {
-		system.Model = descriptionModel(enterpriseNumber, system.Description)
+	if len(system.Model) < 1 && vendor.Model != nil {
+		system.Model = vendor.Model(system.Description)
 	}
 }
 
-func objectIDEnterpriseNumber(objectID string) string {
-	suffix, ok := strings.CutPrefix(objectID, oidEnterprises+".")
-
-	if !ok {
-		return ""
-	}
-
-	number, _, _ := strings.Cut(suffix, ".")
-
-	return number
-}
-
-func enterpriseManufacturer(enterpriseNumber string) string {
-	switch enterpriseNumber {
-	case "9":
-		return "Cisco"
-	case "11", "232":
-		return "Hewlett Packard"
-	case "161", "17713":
-		return "Cambium"
-	case "2509":
-		return "Aviat"
-	case "2636":
-		return "Juniper"
-	case "3808":
-		return "CyberPower"
-	case "14988":
-		return "MikroTik"
-	case "41112":
-		return "Ubiquiti"
-	case "46242":
-		return "Netonix"
-	case "52642":
-		return "FiberStore"
-	default:
-		return ""
-	}
-}
-
-func descriptionModel(enterpriseNumber, description string) string {
-	fields := strings.Fields(description)
-
-	switch {
-	case enterpriseNumber == "14988" && len(fields) > 1 && fields[0] == "RouterOS":
-		return fields[1]
-	case enterpriseNumber == "46242" && len(fields) > 1 && fields[0] == "Netonix":
-		return fields[1]
-	case enterpriseNumber == "2636" && len(fields) > 3 && strings.HasPrefix(description, "Juniper Networks, Inc. "):
-		return strings.ToUpper(fields[3])
-	default:
-		return ""
-	}
-}
-
-func walkTable(client *gosnmp.GoSNMP, entryOID string) (map[string]snmpRow, error) {
-	rows := make(map[string]snmpRow)
-	prefix := entryOID + "."
-
-	walk := client.BulkWalk
-
-	if client.Version == gosnmp.Version1 {
-		walk = client.Walk
-	}
-
-	err := walk(entryOID, func(pdu gosnmp.SnmpPDU) error {
-		suffix, ok := strings.CutPrefix(strings.TrimPrefix(pdu.Name, "."), prefix)
-
-		if !ok {
-			return nil
-		}
-
-		rawColumn, index, ok := strings.Cut(suffix, ".")
-
-		if !ok {
-			return nil
-		}
-
-		column, err := strconv.Atoi(rawColumn)
-
-		if err != nil {
-			return nil
-		}
-
-		if rows[index] == nil {
-			rows[index] = make(snmpRow)
-		}
-
-		rows[index][column] = pdu
-
-		return nil
-	})
-
-	if err != nil && strings.HasPrefix(err.Error(), "OID not increasing") {
-		return rows, nil
-	}
-
-	return rows, err
-}
-
-func rowString(row snmpRow, column int) string {
-	pdu, ok := row[column]
-
-	if !ok {
-		return ""
-	}
-
-	return pduString(pdu)
-}
-
-func rowBytes(row snmpRow, column int) []byte {
-	pdu, ok := row[column]
-
-	if !ok || pdu.Type != gosnmp.OctetString {
-		return nil
-	}
-
-	value, _ := pdu.Value.([]byte)
-
-	return value
-}
-
-func rowInt(row snmpRow, column int) int64 {
-	value, _ := rowNumber(row, column)
-
-	return value
-}
-
-func rowNumber(row snmpRow, column int) (int64, bool) {
-	pdu, ok := row[column]
-
-	if !ok {
-		return 0, false
-	}
-
-	switch pdu.Type {
-	case gosnmp.Integer, gosnmp.Counter32, gosnmp.Gauge32, gosnmp.TimeTicks, gosnmp.Counter64, gosnmp.Uinteger32:
-		return pduInt(pdu), true
-	default:
-		return 0, false
-	}
-}
-
-func rowCounter(row snmpRow, column int, fallbackRow snmpRow, fallbackColumn int) int64 {
-	if value, ok := rowNumber(row, column); ok {
+func rowCounter(row snmp.Row, column int, fallbackRow snmp.Row, fallbackColumn int) int64 {
+	if value, ok := row.Number(column); ok {
 		return value
 	}
 
-	return rowInt(fallbackRow, fallbackColumn)
-}
-
-func pduString(pdu gosnmp.SnmpPDU) string {
-	switch pdu.Type {
-	case gosnmp.OctetString:
-		value, _ := pdu.Value.([]byte)
-
-		return strings.TrimSpace(strings.ToValidUTF8(strings.TrimRight(string(value), "\x00"), ""))
-	case gosnmp.ObjectIdentifier, gosnmp.IPAddress:
-		value, _ := pdu.Value.(string)
-
-		return strings.TrimPrefix(value, ".")
-	default:
-		return ""
-	}
-}
-
-func pduInt(pdu gosnmp.SnmpPDU) int64 {
-	return gosnmp.ToBigInt(pdu.Value).Int64()
+	return fallbackRow.Int(fallbackColumn)
 }
 
 func formatMACAddress(value []byte) *string {
@@ -828,7 +817,7 @@ func lldpIdentifier(subtype int64, value []byte, macAddressSubtype, networkAddre
 	return formatPrintableOrHex(value)
 }
 
-func lldpInterfaceIndex(localPortNumber, localPortID, localPortDescription string, interfaces []dashboard.Interface) *int {
+func lldpInterfaceIndex(localPortNumber, localPortID, localPortDescription string, interfaces []api.Interface) *int {
 	for _, candidate := range []string{localPortID, localPortDescription} {
 		if len(candidate) < 1 {
 			continue
@@ -856,12 +845,12 @@ func lldpInterfaceIndex(localPortNumber, localPortID, localPortDescription strin
 	return nil
 }
 
-func interfaceSpeed(row, extensionRow snmpRow) int64 {
-	if highSpeed := rowInt(extensionRow, 15); highSpeed > 0 {
+func interfaceSpeed(row, extensionRow snmp.Row) int64 {
+	if highSpeed := extensionRow.Int(15); highSpeed > 0 {
 		return highSpeed * 1_000_000
 	}
 
-	return rowInt(row, 5)
+	return row.Int(5)
 }
 
 func interfaceLastChangedAt(bootedAt time.Time, ticks int64) *time.Time {
@@ -875,68 +864,86 @@ func interfaceLastChangedAt(bootedAt time.Time, ticks int64) *time.Time {
 func interfaceStatus(value int64) string {
 	switch value {
 	case 1:
-		return dashboard.InterfaceStatusUp
+		return api.InterfaceStatusUp
 	case 2:
-		return dashboard.InterfaceStatusDown
+		return api.InterfaceStatusDown
 	case 3:
-		return dashboard.InterfaceStatusTesting
+		return api.InterfaceStatusTesting
 	case 5:
-		return dashboard.InterfaceStatusDormant
+		return api.InterfaceStatusDormant
 	case 6:
-		return dashboard.InterfaceStatusNotPresent
+		return api.InterfaceStatusNotPresent
 	case 7:
-		return dashboard.InterfaceStatusLowerLayerDown
+		return api.InterfaceStatusLowerLayerDown
 	default:
-		return dashboard.InterfaceStatusUnknown
+		return api.InterfaceStatusUnknown
 	}
 }
 
 func interfaceType(ianaType int) string {
 	switch ianaType {
 	case 6, 62, 69, 117:
-		return dashboard.InterfaceTypeEthernet
+		return api.InterfaceTypeEthernet
 	case 71:
-		return dashboard.InterfaceTypeWireless
+		return api.InterfaceTypeWireless
 	case 24:
-		return dashboard.InterfaceTypeLoopback
+		return api.InterfaceTypeLoopback
 	case 135, 136:
-		return dashboard.InterfaceTypeVLAN
+		return api.InterfaceTypeVLAN
 	case 161:
-		return dashboard.InterfaceTypeLAG
+		return api.InterfaceTypeLAG
 	case 131:
-		return dashboard.InterfaceTypeTunnel
+		return api.InterfaceTypeTunnel
 	case 209:
-		return dashboard.InterfaceTypeBridge
+		return api.InterfaceTypeBridge
 	case 23, 108:
-		return dashboard.InterfaceTypePPP
+		return api.InterfaceTypePPP
 	case 53:
-		return dashboard.InterfaceTypeVirtual
+		return api.InterfaceTypeVirtual
 	default:
-		return dashboard.InterfaceTypeOther
+		return api.InterfaceTypeOther
 	}
 }
 
+// inventoryClass names an entPhysicalClass value
 func inventoryClass(value int64) string {
-	if value == 3 {
-		return inventoryClassChassis
+	switch value {
+	case entity.ClassChassis:
+		return api.InventoryClassChassis
+	case 4:
+		return api.InventoryClassBackplane
+	case 5:
+		return api.InventoryClassContainer
+	case 6:
+		return api.InventoryClassPowerSupply
+	case 7:
+		return api.InventoryClassFan
+	case entity.ClassModule:
+		return api.InventoryClassModule
+	case entity.ClassPort:
+		return api.InventoryClassPort
+	case 11:
+		return api.InventoryClassStack
+	case 12:
+		return api.InventoryClassCPU
+	default:
+		return api.InventoryClassOther
 	}
-
-	return inventoryClassOther
 }
 
 func storageType(oid string) string {
 	switch strings.TrimPrefix(oid, oidStorageTypes+".") {
 	case "2":
-		return dashboard.StorageTypeRAM
+		return api.StorageTypeRAM
 	case "3":
-		return dashboard.StorageTypeVirtualMemory
+		return api.StorageTypeVirtualMemory
 	case "4":
-		return dashboard.StorageTypeFixedDisk
+		return api.StorageTypeFixedDisk
 	case "5":
-		return dashboard.StorageTypeRemovableDisk
+		return api.StorageTypeRemovableDisk
 	case "9":
-		return dashboard.StorageTypeFlash
+		return api.StorageTypeFlash
 	default:
-		return dashboard.StorageTypeOther
+		return api.StorageTypeOther
 	}
 }

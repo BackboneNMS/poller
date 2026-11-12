@@ -1,8 +1,13 @@
-dashboard:
-  url: https://app.backbonenms.com
+polling_server:
+  urls:
+    - https://poll.backbonenms.net
   token: ''
   timeout: 30s
 snmp:
-  concurrency: 32
+  concurrency: 128
+  discovery_concurrency: 4
   timeout: 5s
   retries: 1
+config_backup:
+  concurrency: 4
+  timeout: 30s

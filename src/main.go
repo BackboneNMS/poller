@@ -3,8 +3,8 @@ package main
 import (
 	"context"
 	"log/slog"
+	"main/src/api"
 	"main/src/config"
-	"main/src/dashboard"
 	"os"
 	"os/signal"
 	"syscall"
@@ -17,9 +17,9 @@ const (
 )
 
 var (
-	conf   *config.Config    = config.New()
-	client *dashboard.Client = nil
-	logger *slog.Logger      = slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	conf   *config.Config = config.New()
+	client *api.Client    = nil
+	logger *slog.Logger   = newLogger()
 )
 
 func main() {
@@ -28,13 +28,16 @@ func main() {
 		os.Exit(1)
 	}
 
-	client = dashboard.New(conf.Dashboard.URL, conf.Dashboard.Token, Version, conf.Dashboard.Timeout)
+	client = api.New(conf.PollingServer.URLs, conf.PollingServer.Token, Version, conf.PollingServer.Timeout)
 
-	logger.Info("Starting poller", "version", Version, "dashboard", conf.Dashboard.URL, "concurrency", conf.SNMP.Concurrency)
+	logger.Info("Starting poller", "version", Version, "pollingServers", conf.PollingServer.URLs, "concurrency", conf.SNMP.Concurrency, "discoveryConcurrency", conf.SNMP.DiscoveryConcurrency, "configBackupConcurrency", conf.ConfigBackup.Concurrency)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 
 	defer stop()
+
+	go RunDiscoveryWorkers(ctx)
+	go RunConfigBackupWorkers(ctx)
 
 	for {
 		startedAt := time.Now()
