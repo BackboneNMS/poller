@@ -6,7 +6,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY src ./src
-RUN CGO_ENABLED=0 go build -o /out/poller ./src
+RUN CGO_ENABLED=0 go build -o /out/polling-agent ./src
 
 FROM debian:bookworm-slim
 
@@ -16,8 +16,8 @@ RUN apt-get update \
 
 WORKDIR /app
 
-COPY --from=build /out/poller /usr/local/bin/poller
+COPY --from=build /out/polling-agent /usr/local/bin/polling-agent
 
 USER nobody
 
-ENTRYPOINT ["poller"]
+ENTRYPOINT ["polling-agent"]

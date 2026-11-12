@@ -1,4 +1,4 @@
-# Backbone Poller
+# Backbone Polling Agent
 
 The open source polling agent for [Backbone NMS](https://backbonenms.net). Deploy it anywhere inside your management network and it will monitor every device you add to the Backbone dashboard over ICMP and SNMP, and back up their configurations over SSH or Telnet. It needs no inbound ports and no database, and it reports to the Backbone polling servers rather than the dashboard, so monitoring keeps working while the dashboard is offline.
 
@@ -79,10 +79,10 @@ Create a poller on the dashboard's **Pollers** page and copy its access token. T
 ### Docker
 
 ```sh
-docker run -d --name backbone-poller --restart unless-stopped \
+docker run -d --name backbone-polling-agent --restart unless-stopped \
   -e POLLING_SERVER_URLS=https://poll.backbonenms.net \
   -e POLLING_SERVER_TOKEN=bbp_... \
-  ghcr.io/backbonenms/poller:latest
+  ghcr.io/backbonenms/polling-agent:latest
 ```
 
 ### From source

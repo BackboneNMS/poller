@@ -10,7 +10,7 @@ on:
 
 jobs:
   build:
-    name: Poller
+    name: Polling Agent
     runs-on: ubuntu-latest
 
     steps:

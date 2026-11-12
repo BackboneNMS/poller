@@ -136,7 +136,7 @@ func (c *Client) send(ctx context.Context, url, method, path string, data []byte
 	}
 
 	req.Header.Set("Authorization", "Bearer "+c.token)
-	req.Header.Set("User-Agent", "backbone-poller/"+c.version)
+	req.Header.Set("User-Agent", "backbone-polling-agent/"+c.version)
 	req.Header.Set("X-Poller-Version", c.version)
 	req.Header.Set("X-Poller-Hostname", c.hostname)
 
