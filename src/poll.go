@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"main/src/api"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -76,14 +77,19 @@ func PollAllDevices(ctx context.Context) time.Duration {
 		submitted.Go(func() { submitResults(ctx, results) })
 	}
 
-	for _, device := range list.Devices {
-		wg.Go(func() {
-			select {
-			case slots <- struct{}{}:
-			case <-ctx.Done():
-				return
-			}
+	devices := prioritizeDevices(list.Devices)
 
+	// Slots are taken here rather than inside each goroutine so devices start polling in the order of the list, with
+	// priority devices first. The rest fill any free slots straight away instead of waiting for them to finish.
+dispatch:
+	for _, device := range devices {
+		select {
+		case slots <- struct{}{}:
+		case <-ctx.Done():
+			break dispatch
+		}
+
+		wg.Go(func() {
 			var (
 				result api.PollResult
 				polled bool
@@ -123,6 +129,7 @@ func PollAllDevices(ctx context.Context) time.Duration {
 	logger.Info(
 		"Completed poll cycle",
 		"devices", len(list.Devices),
+		"prioritized", countPriorityDevices(devices),
 		"unreachable", failed.Load(),
 		"skippedWhileDiscovering", skipped.Load(),
 		"discoveriesQueued", queued,
@@ -221,6 +228,37 @@ func pingOnlyResult(device api.Device, polledAt time.Time, online bool, latency 
 	}
 
 	return result
+}
+
+// prioritizeDevices orders a device list for polling: devices the polling server marked as priority (down or unknown)
+// first, then the rest, each group keeping the server's order
+func prioritizeDevices(devices []api.Device) []api.Device {
+	ordered := slices.Clone(devices)
+
+	slices.SortStableFunc(ordered, func(a, b api.Device) int {
+		switch {
+		case a.Priority == b.Priority:
+			return 0
+		case a.Priority:
+			return -1
+		default:
+			return 1
+		}
+	})
+
+	return ordered
+}
+
+func countPriorityDevices(devices []api.Device) int {
+	count := 0
+
+	for _, device := range devices {
+		if device.Priority {
+			count++
+		}
+	}
+
+	return count
 }
 
 func pruneDeviceState(devices []api.Device) {

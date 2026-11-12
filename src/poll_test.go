@@ -2,6 +2,7 @@ package main
 
 import (
 	"main/src/api"
+	"strings"
 	"testing"
 	"time"
 )
@@ -19,5 +20,28 @@ func TestPingOnlyResult(t *testing.T) {
 
 	if down.Online || down.Reachable || down.Error == nil {
 		t.Fatalf("expected a silent ping-only device to be offline with an error, got %+v", down)
+	}
+}
+
+func TestPrioritizeDevices(t *testing.T) {
+	devices := []api.Device{{ID: "a"}, {ID: "b", Priority: true}, {ID: "c"}, {ID: "d", Priority: true}}
+
+	ordered := prioritizeDevices(devices)
+	ids := make([]string, len(ordered))
+
+	for i, device := range ordered {
+		ids[i] = device.ID
+	}
+
+	if strings.Join(ids, ",") != "b,d,a,c" {
+		t.Fatalf("expected priority devices first in server order, got %v", ids)
+	}
+
+	if devices[0].ID != "a" {
+		t.Fatal("expected the server's list to be left as it was")
+	}
+
+	if count := countPriorityDevices(ordered); count != 2 {
+		t.Fatalf("expected 2 priority devices, got %d", count)
 	}
 }

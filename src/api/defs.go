@@ -45,7 +45,8 @@ type DeviceList struct {
 // discovery instead, which also walks the tables that rarely change (neighbors, addresses, inventory, optics).
 // DiscoveryRequestedAt is set while someone has asked for a rediscovery from the dashboard, and LastDiscoveredAt orders
 // the queue so the devices discovered longest ago go first. PingOnly devices are only pinged, never queried over SNMP,
-// and are sent without credentials.
+// and are sent without credentials. Priority marks devices that were down or unknown at their last poll, which the
+// poller polls before the rest of the cycle so outages and recoveries show up sooner.
 type Device struct {
 	ID                   string     `json:"_id"`
 	Name                 string     `json:"name"`
@@ -55,6 +56,7 @@ type Device struct {
 	Discover             bool       `json:"discover"`
 	DiscoveryRequestedAt *time.Time `json:"discoveryRequestedAt"`
 	LastDiscoveredAt     *time.Time `json:"lastDiscoveredAt"`
+	Priority             bool       `json:"priority"`
 }
 
 type DeviceSNMP struct {
