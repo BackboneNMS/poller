@@ -240,6 +240,8 @@ func CollectSNMPData(ctx context.Context, device api.Device, polledAt time.Time,
 
 	defer client.Conn.Close()
 
+	enterpriseNumber := objectIDEnterpriseNumber(system.ObjectID)
+
 	interfaces, err := collectInterfaces(client, polledAt.Add(-time.Duration(system.UptimeSeconds)*time.Second), discover)
 
 	if err != nil {
@@ -259,17 +261,29 @@ func CollectSNMPData(ctx context.Context, device api.Device, polledAt time.Time,
 			return nil, err
 		}
 
-		if err = collectOptics(client, objectIDEnterpriseNumber(system.ObjectID), physicalRows, interfaces); err != nil {
+		if err = collectOptics(client, enterpriseNumber, physicalRows, interfaces); err != nil {
 			logger.Warn("Failed to collect transceiver light levels", "device", device.Name, "host", device.Host, "error", err)
 		}
 
 		applyHardwareDetails(system, collectInventory(physicalRows))
+
+		if isNokia(enterpriseNumber) {
+			if err = collectNokiaHardware(client, enterpriseNumber, system); err != nil {
+				logger.Warn("Failed to collect Nokia hardware details", "device", device.Name, "host", device.Host, "error", err)
+			}
+		}
 	}
 
 	resources, err := collectResources(client)
 
 	if err != nil {
 		return nil, err
+	}
+
+	if isNokia(enterpriseNumber) && (resources.CPULoadPercent == nil || resources.MemoryTotalBytes == nil) {
+		if err = collectNokiaResources(client, enterpriseNumber, resources); err != nil {
+			logger.Warn("Failed to collect Nokia CPU and memory", "device", device.Name, "host", device.Host, "error", err)
+		}
 	}
 
 	return &snmpData{
@@ -704,6 +718,8 @@ func enterpriseManufacturer(enterpriseNumber string) string {
 		return "CyberPower"
 	case "14988":
 		return "MikroTik"
+	case "94", enterpriseNokiaISAM, enterpriseNokiaSROS:
+		return "Nokia"
 	case "41112":
 		return "Ubiquiti"
 	case "46242":
@@ -725,6 +741,10 @@ func descriptionModel(enterpriseNumber, description string) string {
 		return fields[1]
 	case enterpriseNumber == "2636" && len(fields) > 3 && strings.HasPrefix(description, "Juniper Networks, Inc. "):
 		return strings.ToUpper(fields[3])
+	case enterpriseNumber == enterpriseNokiaSROS:
+		_, model := nokiaDescription(description)
+
+		return model
 	default:
 		return ""
 	}

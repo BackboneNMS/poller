@@ -93,8 +93,9 @@ func roundDBm(value float64) float64 {
 }
 
 // collectOptics adds transceiver light levels to the interfaces they belong to. Vendors expose them differently:
-// Juniper and MikroTik in their own tables indexed by interface, everyone else as sensors in the ENTITY-SENSOR-MIB
-// (or Cisco's variant of it) that have to be traced through the ENTITY-MIB hierarchy back to an interface.
+// Juniper, MikroTik and Nokia SR OS in their own tables indexed by interface, everyone else as sensors in the
+// ENTITY-SENSOR-MIB (or Cisco's variant of it) that have to be traced through the ENTITY-MIB hierarchy back to an
+// interface.
 func collectOptics(client *gosnmp.GoSNMP, enterpriseNumber string, physicalRows map[string]snmpRow, interfaces []api.Interface) error {
 	readings := make(opticalReadings)
 
@@ -121,6 +122,20 @@ func collectOptics(client *gosnmp.GoSNMP, enterpriseNumber string, physicalRows 
 		}
 
 		mikroTikReadings(rows, interfaces, readings)
+	case enterpriseNokiaSROS:
+		laneRows, err := walkTable(client, oidNokiaDDMLaneEntry, 12, 14, 16, 17, 19, 21)
+
+		if err != nil {
+			return err
+		}
+
+		rows, err := walkTable(client, oidNokiaDDMEntry, 16, 18, 20, 21, 23, 25)
+
+		if err != nil {
+			return err
+		}
+
+		nokiaReadings(rows, laneRows, readings)
 	}
 
 	if len(readings) > 0 {

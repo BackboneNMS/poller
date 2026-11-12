@@ -21,11 +21,13 @@ Only outbound HTTPS to the polling servers is required. Interface throughput is 
 | Name, description, contact, location, uptime | SNMPv2-MIB `system` |
 | Interfaces with status, speed, counters, errors and throughput | IF-MIB `ifTable` / `ifXTable` |
 | IPv4 addresses per interface | IP-MIB `ipAddrTable` |
-| Manufacturer, model, serial number and firmware | ENTITY-MIB, plus vendor detection from `sysObjectID` |
-| CPU load, memory and storage usage | HOST-RESOURCES-MIB |
+| Manufacturer, model, serial number and firmware | ENTITY-MIB, plus vendor detection from `sysObjectID`; TIMETRA-CHASSIS-MIB (Nokia SR OS), ASAM-EQUIP-MIB and ASAM-SYSTEM-MIB (Nokia ISAM) |
+| CPU load, memory and storage usage | HOST-RESOURCES-MIB; TIMETRA-SYSTEM-MIB (Nokia SR OS) and ASAM-SYSTEM-MIB (Nokia ISAM) for CPU and memory |
 | Directly connected neighbors | LLDP-MIB |
-| Transceiver receive and transmit light levels, per lane | ENTITY-SENSOR-MIB, CISCO-ENTITY-SENSOR-MIB, JUNIPER-DOM-MIB, MIKROTIK-MIB |
-| Transceiver low and high alarm thresholds for those light levels | CISCO-ENTITY-SENSOR-MIB, JUNIPER-DOM-MIB |
+| Transceiver receive and transmit light levels, per lane | ENTITY-SENSOR-MIB, CISCO-ENTITY-SENSOR-MIB, JUNIPER-DOM-MIB, MIKROTIK-MIB, TIMETRA-PORT-MIB (Nokia SR OS) |
+| Transceiver low and high alarm thresholds for those light levels | CISCO-ENTITY-SENSOR-MIB, JUNIPER-DOM-MIB, TIMETRA-PORT-MIB (Nokia SR OS) |
+
+Nokia SR OS routers and switches (7750 SR, 7250 IXR, 7210 SAS and others) and ISAM access nodes and OLTs (7302, 7330, 7360 FX) implement neither HOST-RESOURCES-MIB nor, on SR OS, the standard hardware and sensor MIBs, so their own MIBs are read instead when the standard ones come back empty. Model and software version on SR OS come from the `TiMOS-...` system description.
 
 ## Installation
 
