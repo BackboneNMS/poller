@@ -42,6 +42,13 @@ type Vendor struct {
 	// own, as on Cisco IOS ("community@vlan" on SNMPv1 and v2c, context "vlan-N" on v3). It is only called when the
 	// device has no Q-BRIDGE-MIB forwarding table.
 	ForwardingVLANs func(client *gosnmp.GoSNMP) ([]int, error)
+	// ForwardingTable reads the MAC addresses the device learned on its interfaces from the vendor's own tables, for
+	// devices that keep them outside the standard bridge MIBs (Nokia SR OS VPLS services). It is only called when the
+	// standard ones have none, and must return an empty slice rather than nil when it finds none.
+	ForwardingTable func(client *gosnmp.GoSNMP, interfaces []api.Interface) ([]api.ForwardingEntry, error)
+	// BGP reads BGP sessions from the vendor's own tables, which unlike BGP4-MIB also cover IPv6 peers and 4-byte AS
+	// numbers. When it finds sessions they are used instead of BGP4-MIB's; otherwise BGP4-MIB is read.
+	BGP func(client *gosnmp.GoSNMP) (*api.BGP, error)
 	// ConfigPlatforms are the command lines the family's configuration is backed up from, in the order they are
 	// tried when detecting a device's platform (see DetectConfigPlatform)
 	ConfigPlatforms []*ConfigPlatform
