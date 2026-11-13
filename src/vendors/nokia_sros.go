@@ -14,7 +14,8 @@ import (
 
 // Nokia SR OS routers and switches (7750 SR, 7250 IXR, 7210 SAS and others), formerly Alcatel-Lucent TiMetra, implement
 // neither HOST-RESOURCES-MIB nor ENTITY-MIB hardware or ENTITY-SENSOR-MIB optics, so TIMETRA-SYSTEM-MIB,
-// TIMETRA-CHASSIS-MIB and TIMETRA-PORT-MIB are read instead. SR Linux shares the enterprise number; where it does not
+// TIMETRA-CHASSIS-MIB and TIMETRA-PORT-MIB are read instead. MAC addresses learned in VPLS services are only in
+// TIMETRA-SERV-MIB, not the bridge MIBs, and BGP sessions with 4-byte AS numbers and IPv6 peers only in TIMETRA-BGP-MIB. SR Linux shares the enterprise number; where it does not
 // answer these tables, the standard MIBs are used as for any other device.
 const (
 	oidNokiaCPUUsage              = "1.3.6.1.4.1.6527.3.1.2.1.1.1.0"  // sgiCpuUsage, percent
@@ -23,6 +24,9 @@ const (
 	oidNokiaHardwareEntry         = "1.3.6.1.4.1.6527.3.1.2.2.1.8.1"  // tmnxHwEntry, indexed by chassis and hardware index
 	oidNokiaDDMEntry              = "1.3.6.1.4.1.6527.3.1.2.2.4.31.1" // tmnxDigitalDiagMonitorEntry, indexed by chassis and port ID
 	oidNokiaDDMLaneEntry          = "1.3.6.1.4.1.6527.3.1.2.2.4.66.1" // tmnxDDMLaneEntry, indexed by chassis, port ID and lane
+	oidNokiaFDBEntry              = "1.3.6.1.4.1.6527.3.1.2.4.2.4.1"  // tlsFdbInfoEntry, indexed by service ID and MAC address
+	oidNokiaBGPPeerEntry          = "1.3.6.1.4.1.6527.3.1.2.14.4.7.1" // tBgpPeerNgEntry, indexed by routing instance and peer address
+	oidNokiaBGPPeerOperEntry      = "1.3.6.1.4.1.6527.3.1.2.14.4.8.1" // tBgpPeerNgOperEntry, which augments tBgpPeerNgEntry
 
 	// tmnxHwEntry columns, and the tmnxHwClass values of the chassis and of control processor cards
 	nokiaHardwareSerialNumber    = 5
@@ -30,6 +34,24 @@ const (
 	nokiaHardwareFirmwareVersion = 33
 	nokiaHardwareClassChassis    = 3
 	nokiaHardwareClassCPM        = 9
+
+	// tlsFdbInfoEntry columns, and the tlsFdbLocale of addresses learned on a SAP (a port and encapsulation) rather
+	// than over a tunnel to another router or by the device itself
+	nokiaFDBLocale     = 4
+	nokiaFDBPortID     = 5
+	nokiaFDBEncapValue = 6
+	nokiaFDBLocaleSAP  = 1
+
+	// tBgpPeerNgEntry columns (tBgpPeerNgShutdown is true(1) for a shut down session), and tBgpPeerNgOperEntry columns
+	nokiaBGPPeerShutdown        = 6
+	nokiaBGPPeerDescription     = 7
+	nokiaBGPPeerLocalAddress    = 13
+	nokiaBGPPeerState           = 59
+	nokiaBGPPeerLocalAS         = 65
+	nokiaBGPPeerRemoteAS        = 66
+	nokiaBGPPeerShutdownTrue    = 1
+	nokiaBGPPeerEstablishedTime = 177
+	nokiaBGPPeerIdentifier      = 181
 )
 
 // nokiaDescriptionPattern reads an SR OS sysDescr, such as "TiMOS-B-20.10.R3 both/x86_64 Nokia 7750 SR Copyright (c)
@@ -44,6 +66,8 @@ var nokiaSROS = &Vendor{
 	Hardware:          nokiaHardware,
 	Resources:         nokiaResources,
 	Optics:            nokiaOptics,
+	ForwardingTable:   nokiaForwardingTable,
+	BGP:               nokiaBGP,
 	ConfigPlatforms:   []*ConfigPlatform{nokiaSROSConfig},
 }
 
@@ -226,4 +250,122 @@ func nokiaThresholds(readings optics.Readings, interfaceIndex int, receive bool,
 
 func tenthMicrowattsToDBm(value int64) float64 {
 	return optics.MilliwattsToDBm(float64(value) / 10000)
+}
+
+func nokiaForwardingTable(client *gosnmp.GoSNMP, interfaces []api.Interface) ([]api.ForwardingEntry, error) {
+	rows, err := snmp.WalkTable(client, oidNokiaFDBEntry, nokiaFDBLocale, nokiaFDBPortID, nokiaFDBEncapValue)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return nokiaForwardingEntries(rows, interfaces), nil
+}
+
+// nokiaForwardingEntries reads the MAC addresses VPLS services learned on their SAPs from tlsFdbInfoTable rows, indexed
+// by service ID and MAC address. A SAP's port ID is its port's ifIndex on SR OS; addresses on port IDs that are not
+// among the device's interfaces are left out, since they could not be shown on one.
+func nokiaForwardingEntries(rows map[string]snmp.Row, interfaces []api.Interface) []api.ForwardingEntry {
+	indexes := make(map[int64]bool, len(interfaces))
+
+	for _, item := range interfaces {
+		indexes[int64(item.Index)] = true
+	}
+
+	entries := make([]api.ForwardingEntry, 0, len(rows))
+
+	for index, row := range rows {
+		_, rawAddress, _ := strings.Cut(index, ".")
+		address, ok := snmp.MACAddressFromIndex(rawAddress)
+		portID := row.Int(nokiaFDBPortID)
+
+		if !ok || row.Int(nokiaFDBLocale) != nokiaFDBLocaleSAP || !indexes[portID] {
+			continue
+		}
+
+		entries = append(entries, api.ForwardingEntry{MACAddress: address, InterfaceIndex: int(portID), VLAN: nokiaEncapVLAN(row.Int(nokiaFDBEncapValue))})
+	}
+
+	return entries
+}
+
+// nokiaEncapVLAN reads the VLAN out of an Ethernet SAP's encapsulation value (TmnxEncapVal in TIMETRA-TC-MIB): the
+// 802.1Q tag of a dot1q SAP, or the outer tag (the low 16 bits) of a QinQ one. Null encapsulation, the '*' wildcard
+// (4095) and connection-profile SAPs covering a range of VLANs (bit 31 or 15 set) have no single VLAN.
+func nokiaEncapVLAN(value int64) *int {
+	if value&(1<<31) != 0 || value&(1<<15) != 0 {
+		return nil
+	}
+
+	vlan := int(value & 0xFFF)
+
+	if vlan < 1 || vlan > 4094 {
+		return nil
+	}
+
+	return &vlan
+}
+
+func nokiaBGP(client *gosnmp.GoSNMP) (*api.BGP, error) {
+	rows, err := snmp.WalkTable(client, oidNokiaBGPPeerEntry, nokiaBGPPeerShutdown, nokiaBGPPeerDescription, nokiaBGPPeerLocalAddress, nokiaBGPPeerState, nokiaBGPPeerLocalAS, nokiaBGPPeerRemoteAS)
+
+	if err != nil || len(rows) < 1 {
+		return &api.BGP{Peers: make([]api.BGPPeer, 0)}, err
+	}
+
+	operRows, err := snmp.WalkTable(client, oidNokiaBGPPeerOperEntry, nokiaBGPPeerEstablishedTime, nokiaBGPPeerIdentifier)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return &api.BGP{Peers: nokiaBGPPeers(rows, operRows)}, nil
+}
+
+// nokiaBGPPeers reads tBgpPeerNgTable rows, indexed by routing instance (1 for the base router) and the peer's address
+// with its type, and the established time and BGP identifier from the table augmenting it
+func nokiaBGPPeers(rows, operRows map[string]snmp.Row) []api.BGPPeer {
+	peers := make([]api.BGPPeer, 0, len(rows))
+
+	for index, row := range rows {
+		parts := strings.Split(index, ".")
+
+		if len(parts) < 2 {
+			continue
+		}
+
+		address, _, ok := snmp.ShiftInetAddress(parts[1:], 0)
+
+		if !ok {
+			continue
+		}
+
+		oper := operRows[index]
+
+		peer := api.BGPPeer{
+			Address:      address,
+			RouterID:     oper.String(nokiaBGPPeerIdentifier),
+			LocalAddress: snmp.FormatInetAddress(row.Bytes(nokiaBGPPeerLocalAddress)),
+			RemoteAS:     row.Int(nokiaBGPPeerRemoteAS),
+			State:        api.BGPPeerStates[row.Int(nokiaBGPPeerState)],
+			AdminEnabled: row.Int(nokiaBGPPeerShutdown) != nokiaBGPPeerShutdownTrue,
+			Description:  row.String(nokiaBGPPeerDescription),
+		}
+
+		if peer.RouterID == "0.0.0.0" {
+			peer.RouterID = ""
+		}
+
+		if localAS, ok := row.Number(nokiaBGPPeerLocalAS); ok && localAS > 0 {
+			peer.LocalAS = &localAS
+		}
+
+		if seconds, ok := oper.Number(nokiaBGPPeerEstablishedTime); ok {
+			peer.EstablishedTimeSeconds = &seconds
+		}
+
+		peers = append(peers, peer)
+	}
+
+	return peers
 }

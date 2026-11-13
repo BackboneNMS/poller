@@ -213,6 +213,10 @@ func OctetString(value string) gosnmp.SnmpPDU {
 	return gosnmp.SnmpPDU{Type: gosnmp.OctetString, Value: []byte(value)}
 }
 
+func IPAddress(value string) gosnmp.SnmpPDU {
+	return gosnmp.SnmpPDU{Type: gosnmp.IPAddress, Value: value}
+}
+
 func ObjectID(value string) gosnmp.SnmpPDU {
 	return gosnmp.SnmpPDU{Type: gosnmp.ObjectIdentifier, Value: value}
 }

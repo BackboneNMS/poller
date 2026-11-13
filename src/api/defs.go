@@ -136,8 +136,8 @@ type ConfigResult struct {
 // PollResult is the outcome of polling one device. Discovery is true for a full discovery. A status poll (false)
 // reports the system details, interface status and counters, and resources only: interfaces carry just their index,
 // name, speed, status and counters, and neighbors are empty, so the polling server merges it into the last discovery.
-// Inventory and ForwardingTable are nil when they were not collected (status polls, or a discovery that failed to read
-// them), which leaves the stored ones alone, and empty when the device has none.
+// Inventory, ForwardingTable, OSPF and BGP are nil when they were not collected (status polls, or a discovery that failed
+// to read them), which leaves the stored ones alone, and empty when the device has none.
 type PollResult struct {
 	DeviceID        string            `json:"deviceID"`
 	Discovery       bool              `json:"discovery"`
@@ -153,6 +153,8 @@ type PollResult struct {
 	Neighbors       []Neighbor        `json:"neighbors"`
 	Inventory       []InventoryItem   `json:"inventory"`
 	ForwardingTable []ForwardingEntry `json:"forwardingTable"`
+	OSPF            *OSPF             `json:"ospf"`
+	BGP             *BGP              `json:"bgp"`
 	Resources       *Resources        `json:"resources"`
 }
 
@@ -264,6 +266,80 @@ type ForwardingEntry struct {
 	VLAN           *int   `json:"vlan"`
 }
 
+// OSPF neighbor states (ospfNbrState in OSPF-MIB, ospfv3NbrState in OSPFV3-MIB)
+const (
+	OSPFNeighborStateDown          = "DOWN"
+	OSPFNeighborStateAttempt       = "ATTEMPT"
+	OSPFNeighborStateInit          = "INIT"
+	OSPFNeighborStateTwoWay        = "TWO_WAY"
+	OSPFNeighborStateExchangeStart = "EXCHANGE_START"
+	OSPFNeighborStateExchange      = "EXCHANGE"
+	OSPFNeighborStateLoading       = "LOADING"
+	OSPFNeighborStateFull          = "FULL"
+)
+
+// OSPF is what a device reports of its OSPF routing, from OSPF-MIB (OSPFv2) and OSPFV3-MIB (OSPFv3): the router IDs it
+// uses, and the routers it is a neighbor of
+type OSPF struct {
+	RouterIDs []string       `json:"routerIDs"`
+	Neighbors []OSPFNeighbor `json:"neighbors"`
+}
+
+// OSPFNeighbor is a router the device is an OSPF neighbor of. Address is the neighbor's address on the shared link
+// (link-local on OSPFv3), and InterfaceIndex the device's interface it is reached through, when that is known.
+type OSPFNeighbor struct {
+	Version        int    `json:"version"`
+	RouterID       string `json:"routerID"`
+	Address        string `json:"address"`
+	InterfaceIndex *int   `json:"interfaceIndex"`
+	State          string `json:"state"`
+}
+
+// BGP session states (bgpPeerState in BGP4-MIB, and the same values in the vendor tables)
+const (
+	BGPPeerStateIdle        = "IDLE"
+	BGPPeerStateConnect     = "CONNECT"
+	BGPPeerStateActive      = "ACTIVE"
+	BGPPeerStateOpenSent    = "OPEN_SENT"
+	BGPPeerStateOpenConfirm = "OPEN_CONFIRM"
+	BGPPeerStateEstablished = "ESTABLISHED"
+)
+
+// BGPPeerStates names bgpPeerState values (BGP4-MIB), which the vendor tables number the same way
+var BGPPeerStates = map[int64]string{
+	1: BGPPeerStateIdle,
+	2: BGPPeerStateConnect,
+	3: BGPPeerStateActive,
+	4: BGPPeerStateOpenSent,
+	5: BGPPeerStateOpenConfirm,
+	6: BGPPeerStateEstablished,
+}
+
+// BGP is what a device reports of its BGP sessions, from BGP4-MIB or the vendor's own tables (which also cover IPv6
+// peers and 4-byte AS numbers): its AS number and BGP identifier, when known, and its peers
+type BGP struct {
+	LocalAS    *int64    `json:"localAS"`
+	Identifier string    `json:"identifier"`
+	Peers      []BGPPeer `json:"peers"`
+}
+
+// BGPPeer is one BGP session. Address and RouterID are the peer's address and BGP identifier; LocalAS is set when the
+// device reports the AS it uses towards this peer. EstablishedTimeSeconds is how long the session has been established,
+// or, when it is not, how long since it last was. InterfaceIndex is the device's interface on the same subnet as the
+// peer, for directly connected peers.
+type BGPPeer struct {
+	Address                string `json:"address"`
+	RouterID               string `json:"routerID"`
+	LocalAddress           string `json:"localAddress"`
+	RemoteAS               int64  `json:"remoteAS"`
+	LocalAS                *int64 `json:"localAS"`
+	State                  string `json:"state"`
+	AdminEnabled           bool   `json:"adminEnabled"`
+	EstablishedTimeSeconds *int64 `json:"establishedTimeSeconds"`
+	Description            string `json:"description"`
+	InterfaceIndex         *int   `json:"interfaceIndex"`
+}
+
 // Resources are a device's CPU load, memory and storage. MemoryUsedPercent is only set for devices that report memory
 // as a percentage without sizes (TP-Link); otherwise it is worked out from the sizes.
 type Resources struct {
@@ -288,4 +364,8 @@ type submitResultsBody struct {
 
 type submitConfigResultsBody struct {
 	Results []ConfigResult `json:"results"`
+}
+
+type latestVersionResponse struct {
+	Version string `json:"version"`
 }

@@ -75,6 +75,40 @@ func TestBridgeForwardingTable(t *testing.T) {
 	expectForwardingTable(t, data.ForwardingTable, []api.ForwardingEntry{{MACAddress: "00:11:22:33:44:55", InterfaceIndex: 35684352}})
 }
 
+// TestNokiaForwardingTable reads the MAC addresses VPLS services learned on their SAPs from TIMETRA-SERV-MIB when the
+// bridge MIBs have none: tagged with the SAP's VLAN (the outer one on QinQ), without one on a null SAP, and leaving out
+// addresses learned over tunnels or on port IDs that are not interfaces
+func TestNokiaForwardingTable(t *testing.T) {
+	const entry = "1.3.6.1.4.1.6527.3.1.2.4.2.4.1"
+
+	values := map[string]gosnmp.SnmpPDU{}
+
+	for _, row := range []struct {
+		index         string
+		locale        int
+		portID        uint
+		encapsulation uint
+	}{
+		{"100.0.17.34.51.68.85", 1, 35684352, 3340},
+		{"100.0.17.34.51.68.86", 2, 0, 0},
+		{"200.0.17.34.51.68.87", 1, 35684352, 20<<16 | 300},
+		{"200.0.17.34.51.68.88", 1, 99, 300},
+		{"300.0.17.34.51.68.89", 1, 35684352, 0},
+	} {
+		values[entry+".4."+row.index] = snmptest.Integer(row.locale)
+		values[entry+".5."+row.index] = snmptest.Gauge(row.portID)
+		values[entry+".6."+row.index] = snmptest.Gauge(row.encapsulation)
+	}
+
+	data := collectFromAgent(t, "1.3.6.1.4.1.6527.1.3.45", "TiMOS-B-26.3.R2 both/armhops64 Nokia 7250 IXR-e2 Copyright (c) 2000-2026 Nokia.", values)
+
+	expectForwardingTable(t, data.ForwardingTable, []api.ForwardingEntry{
+		{MACAddress: "00:11:22:33:44:59", InterfaceIndex: 35684352},
+		{MACAddress: "00:11:22:33:44:57", InterfaceIndex: 35684352, VLAN: PointerOf(300)},
+		{MACAddress: "00:11:22:33:44:55", InterfaceIndex: 35684352, VLAN: PointerOf(3340)},
+	})
+}
+
 // TestCiscoForwardingTablePerVLAN reads each operational Ethernet VLAN in its own context. The simulated agent serves
 // the same values under every community, so each VLAN reports the same address.
 func TestCiscoForwardingTablePerVLAN(t *testing.T) {

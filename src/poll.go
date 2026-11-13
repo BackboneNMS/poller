@@ -207,6 +207,8 @@ func PollDevice(ctx context.Context, device api.Device, interval time.Duration, 
 	result.Neighbors = data.Neighbors
 	result.Inventory = data.Inventory
 	result.ForwardingTable = data.ForwardingTable
+	result.OSPF = data.OSPF
+	result.BGP = data.BGP
 	result.Resources = data.Resources
 
 	calculateInterfaceRates(&result, interval)

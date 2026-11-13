@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"main/src/api"
@@ -160,6 +159,8 @@ type snmpData struct {
 	Neighbors       []api.Neighbor
 	Inventory       []api.InventoryItem
 	ForwardingTable []api.ForwardingEntry
+	OSPF            *api.OSPF
+	BGP             *api.BGP
 	Resources       *api.Resources
 }
 
@@ -219,8 +220,8 @@ func connectSNMP(ctx context.Context, device api.Device, wasUnreachable bool) (*
 
 // CollectSNMPData polls a device over SNMP. A status poll (discover false) reads only what changes from poll to poll:
 // the system details, interface status and counters, and resources. A discovery also walks the tables that change
-// less often (IP addresses, LLDP neighbors, inventory, transceivers and the forwarding table), which is most of the
-// work on large devices.
+// less often (IP addresses, LLDP and OSPF neighbors, BGP sessions, inventory, transceivers and the forwarding table),
+// which is most of the work on large devices.
 func CollectSNMPData(ctx context.Context, device api.Device, polledAt time.Time, wasUnreachable, discover bool) (*snmpData, error) {
 	client, system, credential, err := connectSNMP(ctx, device, wasUnreachable)
 
@@ -276,6 +277,16 @@ func CollectSNMPData(ctx context.Context, device api.Device, polledAt time.Time,
 		// Left nil when it fails, so the polling server keeps the forwarding table from the last discovery
 		if data.ForwardingTable, err = collectForwardingTable(ctx, client, device, credential, vendor, interfaces); err != nil {
 			logger.Warn("Failed to collect forwarding table", "device", device.Name, "host", device.Host, "error", err)
+		}
+
+		// Left nil when it fails, so the polling server keeps the OSPF neighbors from the last discovery
+		if data.OSPF, err = collectOSPF(client, interfaces); err != nil {
+			logger.Warn("Failed to collect OSPF neighbors", "device", device.Name, "host", device.Host, "error", err)
+		}
+
+		// Left nil when it fails, so the polling server keeps the BGP sessions from the last discovery
+		if data.BGP, err = collectBGP(client, vendor, interfaces); err != nil {
+			logger.Warn("Failed to collect BGP sessions", "device", device.Name, "host", device.Host, "error", err)
 		}
 	}
 
@@ -779,24 +790,14 @@ func formatMACAddress(value []byte) *string {
 		return nil
 	}
 
-	return PointerOf(formatHexOctets(value))
-}
-
-func formatHexOctets(value []byte) string {
-	parts := make([]string, len(value))
-
-	for i, octet := range value {
-		parts[i] = strings.ToUpper(hex.EncodeToString([]byte{octet}))
-	}
-
-	return strings.Join(parts, ":")
+	return PointerOf(snmp.FormatHexOctets(value))
 }
 
 func formatPrintableOrHex(value []byte) string {
 	text := strings.TrimRight(string(value), "\x00")
 
 	if !utf8.ValidString(text) || strings.IndexFunc(text, func(r rune) bool { return !unicode.IsPrint(r) }) >= 0 {
-		return formatHexOctets(value)
+		return snmp.FormatHexOctets(value)
 	}
 
 	return strings.TrimSpace(text)

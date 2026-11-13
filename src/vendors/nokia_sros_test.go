@@ -121,3 +121,54 @@ func TestNokiaSROSHooks(t *testing.T) {
 	expectLevels(t, readings, 35684352, []float64{-11.02}, []float64{-3.01}, nil, nil)
 	expectLevels(t, readings, 35717120, []float64{0}, []float64{0}, nil, nil)
 }
+
+func TestNokiaEncapVLAN(t *testing.T) {
+	for value, expected := range map[int64]int{
+		0:                       -1,   // null
+		3340:                    3340, // dot1q
+		4095:                    -1,   // dot1q '*'
+		1<<31 | 100:             -1,   // dot1q connection profile
+		20<<16 | 300:            300,  // QinQ, the outer tag
+		0x0FFF<<16 | 1<<15 | 40: -1,   // QinQ connection profile on the outer tag
+		1<<31 | 0x0FFF:          -1,   // '*.null'
+	} {
+		vlan := -1
+
+		if result := nokiaEncapVLAN(value); result != nil {
+			vlan = *result
+		}
+
+		if vlan != expected {
+			t.Errorf("%#x: expected VLAN %d, got %d", value, expected, vlan)
+		}
+	}
+}
+
+// TestNokiaBGPPeers reads tBgpPeerNgTable, whose index carries the peer address with its length
+func TestNokiaBGPPeers(t *testing.T) {
+	peers := nokiaBGPPeers(
+		map[string]snmp.Row{
+			"1.1.4.10.81.255.109": {6: snmptest.Integer(2), 7: snmptest.OctetString("KC"), 13: snmptest.OctetString(string([]byte{10, 81, 255, 110})), 59: snmptest.Integer(6), 65: snmptest.Gauge(65000), 66: snmptest.Gauge(65000)},
+			"1.1.4.192.0.2.9":     {6: snmptest.Integer(1), 59: snmptest.Integer(1), 66: snmptest.Gauge(3356)},
+		},
+		map[string]snmp.Row{
+			"1.1.4.10.81.255.109": {177: snmptest.Gauge(7200), 181: snmptest.IPAddress("100.78.0.4")},
+		},
+	)
+
+	byAddress := make(map[string]api.BGPPeer)
+
+	for _, peer := range peers {
+		byAddress[peer.Address] = peer
+	}
+
+	kc := byAddress["10.81.255.109"]
+
+	if kc.Description != "KC" || kc.RouterID != "100.78.0.4" || kc.LocalAddress != "10.81.255.110" || kc.State != api.BGPPeerStateEstablished || !kc.AdminEnabled || kc.RemoteAS != 65000 || kc.LocalAS == nil || *kc.LocalAS != 65000 || kc.EstablishedTimeSeconds == nil || *kc.EstablishedTimeSeconds != 7200 {
+		t.Fatalf("unexpected session %+v", kc)
+	}
+
+	if shut := byAddress["192.0.2.9"]; shut.AdminEnabled || shut.State != api.BGPPeerStateIdle || shut.RemoteAS != 3356 || shut.EstablishedTimeSeconds != nil {
+		t.Fatalf("unexpected shut down session %+v", shut)
+	}
+}

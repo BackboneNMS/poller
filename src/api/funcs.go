@@ -67,6 +67,17 @@ func (c *Client) SubmitConfigResults(ctx context.Context, results []ConfigResult
 	return c.request(ctx, http.MethodPost, "/api/poller/configs", submitConfigResultsBody{Results: results}, nil)
 }
 
+// FetchLatestVersion returns the newest poller release the polling server found (MAJOR.MINOR.PATCH)
+func (c *Client) FetchLatestVersion(ctx context.Context) (string, error) {
+	var result latestVersionResponse
+
+	if err := c.request(ctx, http.MethodGet, "/api/poller/latest-version", nil, &result); err != nil {
+		return "", err
+	}
+
+	return result.Version, nil
+}
+
 // request sends a request to the polling server that answered last, failing over to the others in order when it cannot
 // be reached or fails with a server error. Requests a server rejects (an invalid token, for example) are not retried,
 // since every server would reject them the same way. Resubmitting results is safe: the servers ignore duplicates.

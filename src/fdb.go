@@ -21,11 +21,29 @@ const (
 	oidQBridgeVLANEntry = "1.3.6.1.2.1.17.7.1.4.2.1" // Q-BRIDGE-MIB dot1qVlanCurrentEntry, indexed by time mark and VLAN
 )
 
-// collectForwardingTable reads the MAC addresses the device learned on each of its interfaces: from Q-BRIDGE-MIB,
+// collectForwardingTable reads the MAC addresses the device learned on each of its interfaces from the standard bridge
+// MIBs (see collectBridgeForwardingTable), and when they have none, from the vendor's own tables
+func collectForwardingTable(ctx context.Context, client *gosnmp.GoSNMP, device api.Device, credential api.SNMPCredential, vendor *vendors.Vendor, interfaces []api.Interface) ([]api.ForwardingEntry, error) {
+	entries, err := collectBridgeForwardingTable(ctx, client, device, credential, vendor, interfaces)
+
+	if err != nil || len(entries) > 0 || vendor.ForwardingTable == nil {
+		return entries, err
+	}
+
+	if entries, err = vendor.ForwardingTable(client, interfaces); err != nil {
+		return nil, err
+	}
+
+	sortForwardingEntries(entries)
+
+	return entries, nil
+}
+
+// collectBridgeForwardingTable reads the MAC addresses the device learned on each of its interfaces: from Q-BRIDGE-MIB,
 // which has them by VLAN, otherwise from BRIDGE-MIB, one VLAN context at a time for vendors that need it (Cisco).
 // Only the port column is walked, since the cost of a walk grows with the values read and forwarding tables can be
 // large. Entries on ports that are not interfaces (the device's own addresses, on port 0) are left out.
-func collectForwardingTable(ctx context.Context, client *gosnmp.GoSNMP, device api.Device, credential api.SNMPCredential, vendor *vendors.Vendor, interfaces []api.Interface) ([]api.ForwardingEntry, error) {
+func collectBridgeForwardingTable(ctx context.Context, client *gosnmp.GoSNMP, device api.Device, credential api.SNMPCredential, vendor *vendors.Vendor, interfaces []api.Interface) ([]api.ForwardingEntry, error) {
 	rows, err := snmp.WalkTable(client, oidQBridgeFDBEntry, 2)
 
 	if err != nil {
@@ -195,7 +213,7 @@ func qBridgeEntries(rows map[string]snmp.Row, vlans map[int64]int, ports map[int
 	for index, row := range rows {
 		rawFDBID, rawAddress, _ := strings.Cut(index, ".")
 		fdbID, err := strconv.ParseInt(rawFDBID, 10, 64)
-		address, ok := macAddressFromOID(rawAddress)
+		address, ok := snmp.MACAddressFromIndex(rawAddress)
 		interfaceIndex, mapped := ports[row.Int(2)]
 
 		if err != nil || !ok || !mapped {
@@ -223,7 +241,7 @@ func bridgeEntries(rows map[string]snmp.Row, vlan *int, ports map[int64]int) []a
 	entries := make([]api.ForwardingEntry, 0, len(rows))
 
 	for index, row := range rows {
-		address, ok := macAddressFromOID(index)
+		address, ok := snmp.MACAddressFromIndex(index)
 		interfaceIndex, mapped := ports[row.Int(2)]
 
 		if !ok || !mapped {
@@ -236,29 +254,6 @@ func bridgeEntries(rows map[string]snmp.Row, vlan *int, ports map[int64]int) []a
 	sortForwardingEntries(entries)
 
 	return entries
-}
-
-// macAddressFromOID reads a MAC address written as six decimal OID parts, as in "0.17.34.51.68.85"
-func macAddressFromOID(value string) (string, bool) {
-	parts := strings.Split(value, ".")
-
-	if len(parts) != 6 {
-		return "", false
-	}
-
-	octets := make([]byte, len(parts))
-
-	for i, part := range parts {
-		octet, err := strconv.ParseUint(part, 10, 8)
-
-		if err != nil {
-			return "", false
-		}
-
-		octets[i] = byte(octet)
-	}
-
-	return formatHexOctets(octets), true
 }
 
 func sortForwardingEntries(entries []api.ForwardingEntry) {
