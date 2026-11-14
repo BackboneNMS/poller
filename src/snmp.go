@@ -794,13 +794,23 @@ func formatMACAddress(value []byte) *string {
 }
 
 func formatPrintableOrHex(value []byte) string {
+	if text, ok := printableText(value); ok {
+		return text
+	}
+
+	return snmp.FormatHexOctets(value)
+}
+
+// printableText returns an octet string as text, without trailing NULs or spaces, when it is valid UTF-8 made only of
+// printable characters
+func printableText(value []byte) (string, bool) {
 	text := strings.TrimRight(string(value), "\x00")
 
 	if !utf8.ValidString(text) || strings.IndexFunc(text, func(r rune) bool { return !unicode.IsPrint(r) }) >= 0 {
-		return snmp.FormatHexOctets(value)
+		return "", false
 	}
 
-	return strings.TrimSpace(text)
+	return strings.TrimSpace(text), true
 }
 
 func lldpIdentifier(subtype int64, value []byte, macAddressSubtype, networkAddressSubtype int64) string {

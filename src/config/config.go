@@ -27,6 +27,10 @@ type Config struct {
 		Concurrency int           `yaml:"concurrency"`
 		Timeout     time.Duration `yaml:"timeout"`
 	} `yaml:"config_backup"`
+	Traps struct {
+		Enabled bool   `yaml:"enabled"`
+		Port    uint16 `yaml:"port"`
+	} `yaml:"traps"`
 }
 
 func New() *Config {
@@ -39,6 +43,8 @@ func New() *Config {
 	c.SNMP.Retries = 1
 	c.ConfigBackup.Concurrency = 4
 	c.ConfigBackup.Timeout = 30 * time.Second
+	c.Traps.Enabled = true
+	c.Traps.Port = 162
 
 	return c
 }
@@ -122,6 +128,10 @@ func (c *Config) validate() error {
 
 	if c.ConfigBackup.Timeout <= 0 {
 		return errors.New("config_backup.timeout must be greater than 0")
+	}
+
+	if c.Traps.Enabled && c.Traps.Port < 1 {
+		return errors.New("traps.port must be at least 1")
 	}
 
 	return nil

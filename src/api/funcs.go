@@ -37,6 +37,14 @@ func (e *statusError) Error() string {
 	return fmt.Sprintf("%s responded with %d: %s", e.url, e.code, e.message)
 }
 
+// IsRejected reports whether a request failed because a polling server refused it (a 4xx response) rather than
+// because none could be reached, so sending it again would only be refused again
+func IsRejected(err error) bool {
+	var status *statusError
+
+	return errors.As(err, &status) && status.code < http.StatusInternalServerError
+}
+
 func New(urls []string, token, version string, timeout time.Duration) *Client {
 	hostname, _ := os.Hostname()
 
@@ -65,6 +73,10 @@ func (c *Client) SubmitResults(ctx context.Context, results []PollResult) error 
 
 func (c *Client) SubmitConfigResults(ctx context.Context, results []ConfigResult) error {
 	return c.request(ctx, http.MethodPost, "/api/poller/configs", submitConfigResultsBody{Results: results}, nil)
+}
+
+func (c *Client) SubmitTraps(ctx context.Context, traps []Trap) error {
+	return c.request(ctx, http.MethodPost, "/api/poller/traps", submitTrapsBody{Traps: traps}, nil)
 }
 
 // FetchLatestVersion returns the newest poller release the polling server found (MAJOR.MINOR.PATCH)
@@ -123,9 +135,7 @@ func (c *Client) request(ctx context.Context, method, path string, body, result 
 
 		errs = append(errs, err)
 
-		var status *statusError
-
-		if ctx.Err() != nil || errors.As(err, &status) && status.code < http.StatusInternalServerError {
+		if ctx.Err() != nil || IsRejected(err) {
 			break
 		}
 	}

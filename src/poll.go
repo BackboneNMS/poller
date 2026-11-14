@@ -61,6 +61,7 @@ func PollAllDevices(ctx context.Context) time.Duration {
 
 	pollInterval.Store(int64(interval))
 	pruneDeviceState(list.Devices)
+	traps.SetDevices(ctx, list.Devices)
 
 	queued := discoveries.Schedule(list.Devices, startedAt)
 	backupsQueued := configBackups.Schedule(list.Devices, startedAt)

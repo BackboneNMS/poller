@@ -11,3 +11,6 @@ snmp:
 config_backup:
   concurrency: 4
   timeout: 30s
+traps:
+  enabled: true
+  port: 162

@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	Version    = "1.1.0"
+	Version    = "1.2.0"
 	retryDelay = 30 * time.Second
 )
 
@@ -39,6 +39,7 @@ func main() {
 	go RunDiscoveryWorkers(ctx)
 	go RunConfigBackupWorkers(ctx)
 	go RunVersionChecks(ctx)
+	go RunTrapReceiver(ctx)
 
 	for {
 		startedAt := time.Now()

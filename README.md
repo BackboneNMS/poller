@@ -1,6 +1,6 @@
 # Backbone Polling Agent
 
-The open source polling agent for [Backbone NMS](https://backbonenms.net). Deploy it anywhere inside your management network and it will monitor every device you add to the Backbone dashboard over ICMP and SNMP, and back up their configurations over SSH or Telnet. It needs no inbound ports and no database, and it reports to the Backbone polling servers rather than the dashboard, so monitoring keeps working while the dashboard is offline.
+The open source polling agent for [Backbone NMS](https://backbonenms.net). Deploy it anywhere inside your management network and it will monitor every device you add to the Backbone dashboard over ICMP and SNMP, and back up their configurations over SSH or Telnet, and it receives the SNMP traps they send. It needs no database and nothing has to reach it from the internet, and it reports to the Backbone polling servers rather than the dashboard, so monitoring keeps working while the dashboard is offline.
 
 ## How it works
 
@@ -10,6 +10,7 @@ The open source polling agent for [Backbone NMS](https://backbonenms.net). Deplo
    Every device gets a **status poll** each cycle: the system details, interface status and traffic counters, and CPU, memory and storage. A **full discovery** also walks the tables that change less often (IP addresses, LLDP neighbors, inventory, transceivers and the MAC address forwarding table). The polling server marks the devices due for discovery in the device list, and the poller discovers them in the background, up to `snmp.discovery_concurrency` at a time, with requested rediscoveries first, then devices never discovered, then the ones discovered longest ago. A device being discovered is left out of that cycle's status poll.
 3. Results are pushed back to the polling server in batches (`POST /api/poller/results`), several at a time and gzip compressed when the server supports it. Uploads run alongside polling, so a slow upload does not hold up polling.
 4. Devices whose configuration is due to be backed up come with a `configBackup` in the device list. The poller backs them up in the background, up to `config_backup.concurrency` at a time, by logging in over SSH or Telnet and running the platform's commands (see [Config backups](#config-backups)), and submits each configuration on its own (`POST /api/poller/configs`).
+5. Devices can send SNMP traps to the poller on UDP port 162. Each trap is matched to a device by the address it came from and forwarded to the polling server (`POST /api/poller/traps`), which applies what it reports without waiting for the next poll (see [Traps](#traps)).
 
 At startup and every 6 hours, the poller asks the polling server for the latest poller release (`GET /api/poller/latest-version`, found from this repository's release tags) and logs a warning while it is older, saying whether the update is a `major`, `minor` or `patch` change:
 
@@ -19,7 +20,7 @@ At startup and every 6 hours, the poller asks the polling server for the latest 
 
 Several polling server URLs can be configured. The poller keeps using the one that answered last and fails over to the others, in order, when it cannot be reached or responds with a server error. Resubmitting a batch to another server after a timeout is safe, as the servers ignore results they already stored.
 
-Only outbound HTTPS to the polling servers is required. Interface throughput is calculated on the poller from the difference in octet counters between polls, so the first poll after a restart reports counters without rates.
+Only outbound HTTPS to the polling servers is required, plus inbound UDP from your devices for traps. Interface throughput is calculated on the poller from the difference in octet counters between polls, so the first poll after a restart reports counters without rates.
 
 ### Config backups
 
@@ -42,6 +43,23 @@ The platform decides which commands turn off paging and print the configuration.
 | TP-Link JetStream / Omada switch | `enable` if needed, `show running-config`, answering its "Press any key to continue" pager |
 
 Lines that change on every read (build banners, byte counts, "last changed" timestamps, NTP clock-period) are removed so the polling server only stores a new revision when something really changed. Over SSH, the host key fingerprint is recorded at the first backup and the device must present it from then on: a different key fails the backup before any credentials are sent. Older key exchanges and ciphers are offered after the modern ones, since a lot of network equipment supports nothing newer. The platforms have been tested against simulated devices, not real hardware.
+
+### Traps
+
+The poller listens for SNMP traps and informs on UDP port 162 (`traps.port`), so point your devices' trap destination at its address. Each trap is matched to a device by the address it came from: the device's host on the dashboard (host names are looked up again every poll cycle), or else one of the IP addresses its last discovery found on its interfaces, for devices that send traps from a different interface than the one they are polled on. An address more than one device has is not used, and an SNMPv1 trap relayed through another host is matched by the agent address inside it. Traps from any other address are dropped, with a warning logged once an hour for each address.
+
+SNMPv1 and v2c traps are accepted whatever their community. SNMPv3 traps must use one of the device's SNMPv3 credentials on the dashboard (the same user, authentication and privacy settings), with the keys derived from the engine ID in the trap, so devices need no extra setup on the poller. SNMPv2c informs are acknowledged; SNMPv3 informs are not supported, since the receiver of an inform has to be an authoritative SNMP engine, so send SNMPv3 traps instead.
+
+Traps are forwarded with their notification OID and variable bindings, a burst at a time (traps arriving within two seconds go together), and kept for up to 10 minutes while no polling server can be reached. The polling server acts on these, and accepts the rest without using them yet:
+
+| Trap | Effect |
+| --- | --- |
+| `linkDown`, `linkUp` (IF-MIB) | The interface's status changes straight away: its operational status, its administrative status when the trap includes it, and when it last changed |
+| `coldStart`, `warmStart` (SNMPv2-MIB) | The device is discovered again in the next poll cycle, unless its last discovery failed recently |
+
+Traps travel over UDP without acknowledgement, so one can be lost: every poll still reads each interface's status, which corrects anything a lost trap missed.
+
+Port 162 needs privileges. Docker lets containers listen on it, so publish it with `-p 162:162/udp` (traps keep their source address through Docker's port publishing). Running from source as a regular user, give the binary `CAP_NET_BIND_SERVICE` (`AmbientCapabilities=CAP_NET_BIND_SERVICE` in a systemd unit), or set `traps.port` above 1023 and send the traps there. When the port cannot be opened, the poller logs an error and keeps polling without traps. Set `traps.enabled: false` to turn them off.
 
 ### Request limits
 
@@ -86,6 +104,7 @@ Create a poller on the dashboard's **Pollers** page and copy its access token. T
 
 ```sh
 docker run -d --name backbone-polling-agent --restart unless-stopped \
+  -p 162:162/udp \
   -e POLLING_SERVER_URLS=https://poll.backbonenms.net \
   -e POLLING_SERVER_TOKEN=bbp_... \
   ghcr.io/backbonenms/polling-agent:latest
@@ -118,6 +137,8 @@ Settings are read from `config.yml` in the working directory, if it exists. Envi
 | `snmp.retries` | | `1` | Retries for each SNMP request |
 | `config_backup.concurrency` | | `4` | Maximum number of devices backed up at the same time, in the background |
 | `config_backup.timeout` | | `30s` | Timeout for connecting to a device over SSH or Telnet, and for each wait for it to respond |
+| `traps.enabled` | | `true` | Listen for SNMP traps from devices |
+| `traps.port` | | `162` | UDP port to listen for traps on |
 
 Logs are written to stdout as JSON.
 
@@ -131,7 +152,7 @@ make build
 
 Every change bumps `Version` in [src/main.go](src/main.go), following semantic versioning, and a release is made by pushing the matching `v` tag (`v1.2.3`), which publishes the Docker image and becomes the latest version pollers compare themselves against.
 
-The data sent to the polling server is defined in [src/api/defs.go](src/api/defs.go), which must stay in sync with the polling server's copy. SNMP collection from the standard MIBs lives in [src/snmp.go](src/snmp.go), with the shared SNMP primitives in [src/snmp](src/snmp), ENTITY-MIB (physical entities and the interfaces they belong to) in [src/entity](src/entity), transceiver diagnostics in [src/optics](src/optics) and the forwarding table in [src/fdb.go](src/fdb.go).
+The data sent to the polling server is defined in [src/api/defs.go](src/api/defs.go), which must stay in sync with the polling server's copy. SNMP collection from the standard MIBs lives in [src/snmp.go](src/snmp.go), with the shared SNMP primitives in [src/snmp](src/snmp), ENTITY-MIB (physical entities and the interfaces they belong to) in [src/entity](src/entity), transceiver diagnostics in [src/optics](src/optics), the forwarding table in [src/fdb.go](src/fdb.go) and receiving traps in [src/traps.go](src/traps.go).
 
 ### Adding a vendor
 

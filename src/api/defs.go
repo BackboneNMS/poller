@@ -61,11 +61,13 @@ type DeviceList struct {
 // the queue so the devices discovered longest ago go first. PingOnly devices are only pinged, never queried over SNMP,
 // and are sent without credentials. Priority marks devices that were down or unknown at their last poll, which the
 // poller polls before the rest of the cycle so outages and recoveries show up sooner. ConfigBackup is only set when
-// the device's configuration is due to be backed up.
+// the device's configuration is due to be backed up. Addresses are the device's other IP addresses from its last
+// discovery, which traps it sends from another interface are matched by.
 type Device struct {
 	ID                   string        `json:"_id"`
 	Name                 string        `json:"name"`
 	Host                 string        `json:"host"`
+	Addresses            []string      `json:"addresses"`
 	PingOnly             bool          `json:"pingOnly"`
 	SNMP                 DeviceSNMP    `json:"snmp"`
 	Discover             bool          `json:"discover"`
@@ -358,12 +360,48 @@ type Storage struct {
 	UsedBytes   int64  `json:"usedBytes"`
 }
 
+// Trap variable types, named after net-snmp's: STRING is an octet string of printable text, and HEX_STRING any other
+// octet string, written as hex octets separated by colons. Numbers are written in decimal.
+const (
+	TrapVariableTypeInteger   = "INTEGER"
+	TrapVariableTypeString    = "STRING"
+	TrapVariableTypeHexString = "HEX_STRING"
+	TrapVariableTypeOID       = "OID"
+	TrapVariableTypeIPAddress = "IP_ADDRESS"
+	TrapVariableTypeCounter32 = "COUNTER32"
+	TrapVariableTypeGauge32   = "GAUGE32"
+	TrapVariableTypeTimeTicks = "TIMETICKS"
+	TrapVariableTypeCounter64 = "COUNTER64"
+)
+
+// Trap is an SNMP notification (a trap or an inform) a device sent to the poller, matched to the device by the address
+// it came from. TrapOID identifies the notification (snmpTrapOID), worked out from the enterprise and trap numbers of
+// SNMPv1 traps as RFC 3584 describes. Variables are the variable bindings that came with it, without sysUpTime and
+// snmpTrapOID.
+type Trap struct {
+	DeviceID   string         `json:"deviceID"`
+	ReceivedAt time.Time      `json:"receivedAt"`
+	TrapOID    string         `json:"trapOID"`
+	Variables  []TrapVariable `json:"variables"`
+}
+
+// TrapVariable is one variable binding of a trap: an object instance, and its value as text
+type TrapVariable struct {
+	OID   string `json:"oid"`
+	Type  string `json:"type"`
+	Value string `json:"value"`
+}
+
 type submitResultsBody struct {
 	Results []PollResult `json:"results"`
 }
 
 type submitConfigResultsBody struct {
 	Results []ConfigResult `json:"results"`
+}
+
+type submitTrapsBody struct {
+	Traps []Trap `json:"traps"`
 }
 
 type latestVersionResponse struct {
